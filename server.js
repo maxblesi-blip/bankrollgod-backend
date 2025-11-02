@@ -1,7 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
@@ -31,9 +30,6 @@ app.use(rateLimit({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-if (process.env.NODE_ENV !== 'test') {
-  app.use(morgan('combined'));
-}
 
 // Health check
 app.get('/', (req, res) => {
