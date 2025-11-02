@@ -1,941 +1,374 @@
-// server.js
-// Production Backend für BankrollGod Multi-User System
-// Echte JWT Authentication + PostgreSQL
-
-require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
+const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
-const { Pool } = require('pg');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const { v4: uuidv4 } = require('uuid');
+require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3001;
 
-// Database Connection
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-});
-
-// Test database connection
-pool.connect((err, client, release) => {
-  if (err) {
-    console.error('❌ Database connection error:', err.stack);
-  } else {
-    console.log('✅ Database connected successfully');
-    release();
-  }
-});
-
-// Middleware
-app.use(helmet());
-app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-  credentials: true
+// Security
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
-app.use(express.json({ limit: '10mb' }));
+
+// CORS - Allow all origins for now (configure later)
+app.use(cors({
+  origin: true,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
 // Rate limiting
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // 5 attempts per window
-  message: { success: false, message: 'Too many authentication attempts, please try again later' },
-  standardHeaders: true,
-  legacyHeaders: false,
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 1000,
+  message: { success: false, message: 'Too many requests' }
+}));
+
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+if (process.env.NODE_ENV !== 'test') {
+  app.use(morgan('combined'));
+}
+
+// Health check
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Poker Tracker Backend API',
+    version: '1.0.0',
+    status: 'running',
+    environment: process.env.NODE_ENV || 'production',
+    database: 'PostgreSQL',
+    timestamp: new Date().toISOString()
+  });
 });
 
-const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // 100 requests per window
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-app.use('/api/auth', authLimiter);
-app.use('/api', generalLimiter);
-
-// JWT Middleware
-const authenticateToken = async (req, res, next) => {
-  try {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-
-    if (!token) {
-      return res.status(401).json({ success: false, message: 'Access token required' });
-    }
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    
-    // Verify user still exists
-    const userResult = await pool.query(
-      'SELECT id, email, username, first_name, last_name, created_at FROM users WHERE id = $1',
-      [decoded.userId]
-    );
-
-    if (userResult.rows.length === 0) {
-      return res.status(401).json({ success: false, message: 'User not found' });
-    }
-
-    req.user = userResult.rows[0];
-    next();
-  } catch (error) {
-    console.error('Token verification error:', error);
-    return res.status(403).json({ success: false, message: 'Invalid or expired token' });
-  }
-};
-
-// Utility Functions
-const generateTokens = (userId) => {
-  const accessToken = jwt.sign(
-    { userId, type: 'access' },
-    process.env.JWT_SECRET,
-    { expiresIn: '1h' }
-  );
-  
-  const refreshToken = jwt.sign(
-    { userId, type: 'refresh' },
-    process.env.JWT_REFRESH_SECRET,
-    { expiresIn: '7d' }
-  );
-
-  return { accessToken, refreshToken };
-};
-
-const hashPassword = async (password) => {
-  return await bcrypt.hash(password, 12);
-};
-
-const validatePassword = async (password, hashedPassword) => {
-  return await bcrypt.compare(password, hashedPassword);
-};
-
-// Health Check
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    message: 'BankrollGod Production Backend is running',
+app.get('/api/health', (req, res) => {
+  res.json({
+    success: true,
+    status: 'healthy',
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
+    uptime: process.uptime(),
+    environment: process.env.NODE_ENV || 'production'
   });
 });
 
-// ===== AUTHENTICATION ROUTES =====
-
-// Register
-app.post('/api/auth/register', async (req, res) => {
-  try {
-    const { email, password, username, first_name, last_name } = req.body;
-
-    // Validation
-    if (!email || !password || !username) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email, password, and username are required'
-      });
-    }
-
-    if (password.length < 6) {
-      return res.status(400).json({
-        success: false,
-        message: 'Password must be at least 6 characters long'
-      });
-    }
-
-    // Check if user exists
-    const existingUser = await pool.query(
-      'SELECT id FROM users WHERE email = $1 OR username = $2',
-      [email.toLowerCase(), username.toLowerCase()]
-    );
-
-    if (existingUser.rows.length > 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'User with this email or username already exists'
-      });
-    }
-
-    // Hash password
-    const passwordHash = await hashPassword(password);
-
-    // Create user
-    const userId = uuidv4();
-    const userResult = await pool.query(`
-      INSERT INTO users (id, email, username, password_hash, first_name, last_name)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      RETURNING id, email, username, first_name, last_name, created_at
-    `, [userId, email.toLowerCase(), username.toLowerCase(), passwordHash, first_name, last_name]);
-
-    const user = userResult.rows[0];
-    const tokens = generateTokens(userId);
-
-    console.log(`✅ New user registered: ${email}`);
-
-    res.status(201).json({
-      success: true,
-      message: 'User registered successfully',
-      data: {
-        user,
-        access_token: tokens.accessToken,
-        refresh_token: tokens.refreshToken
-      }
-    });
-
-  } catch (error) {
-    console.error('Registration error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Internal server error during registration'
-    });
+// Production Mock APIs (will be replaced with real database)
+const mockBankrolls = [
+  {
+    id: '1',
+    name: 'Online NL200',
+    type: 'online',
+    starting_amount: 2000.00,
+    current_amount: 2500.00,
+    goal_amount: 5000.00,
+    total_sessions: 5,
+    total_games: 12,
+    win_rate: 75.5,
+    roi: 15.3,
+    created_at: new Date().toISOString()
+  },
+  {
+    id: '2',
+    name: 'Live 2/5',
+    type: 'live', 
+    starting_amount: 3000.00,
+    current_amount: 3800.00,
+    goal_amount: 10000.00,
+    total_sessions: 8,
+    total_games: 8,
+    win_rate: 62.5,
+    roi: 26.7,
+    created_at: new Date().toISOString()
+  },
+  {
+    id: '3',
+    name: 'Tournament Bankroll',
+    type: 'online',
+    starting_amount: 1000.00,
+    current_amount: 1350.00,
+    goal_amount: 3000.00,
+    total_sessions: 12,
+    total_games: 45,
+    win_rate: 33.3,
+    roi: 35.0,
+    created_at: new Date().toISOString()
   }
+];
+
+let activeSessions = {};
+let games = {};
+
+// Bankroll endpoints
+app.get('/api/bankrolls', (req, res) => {
+  res.json({ success: true, data: mockBankrolls });
 });
 
-// Login
-app.post('/api/auth/login', async (req, res) => {
-  try {
-    const { email, password, remember_me } = req.body;
-
-    if (!email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email and password are required'
-      });
-    }
-
-    // Find user
-    const userResult = await pool.query(
-      'SELECT * FROM users WHERE email = $1',
-      [email.toLowerCase()]
-    );
-
-    if (userResult.rows.length === 0) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid email or password'
-      });
-    }
-
-    const user = userResult.rows[0];
-
-    // Validate password
-    const isValidPassword = await validatePassword(password, user.password_hash);
-
-    if (!isValidPassword) {
-      console.log(`❌ Failed login attempt for: ${email}`);
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid email or password'
-      });
-    }
-
-    // Generate tokens
-    const tokens = generateTokens(user.id);
-
-    // Remove password from response
-    const { password_hash, ...userResponse } = user;
-
-    console.log(`✅ Successful login: ${email}`);
-
-    res.json({
-      success: true,
-      message: 'Login successful',
-      data: {
-        user: userResponse,
-        access_token: tokens.accessToken,
-        refresh_token: tokens.refreshToken
-      }
-    });
-
-  } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Internal server error during login'
-    });
+app.get('/api/bankrolls/:id', (req, res) => {
+  const bankroll = mockBankrolls.find(b => b.id === req.params.id);
+  if (!bankroll) {
+    return res.status(404).json({ success: false, message: 'Bankroll not found' });
   }
+  res.json({ success: true, data: bankroll });
 });
 
-// Refresh Token
-app.post('/api/auth/refresh', async (req, res) => {
-  try {
-    const { refresh_token } = req.body;
+// Session endpoints
+app.get('/api/sessions/active', (req, res) => {
+  const sessions = Object.values(activeSessions);
+  res.json({ success: true, data: sessions });
+});
 
-    if (!refresh_token) {
-      return res.status(400).json({
-        success: false,
-        message: 'Refresh token required'
-      });
-    }
+app.post('/api/sessions', (req, res) => {
+  const sessionId = Date.now().toString();
+  const session = {
+    id: sessionId,
+    name: req.body.name,
+    bankroll_id: req.body.bankroll_id,
+    status: 'running',
+    start_time: new Date().toISOString(),
+    total_games: 0,
+    total_buy_in: 0.00,
+    total_winnings: 0.00,
+    total_result: 0.00,
+    location: req.body.location || 'Online'
+  };
+  
+  activeSessions[sessionId] = session;
+  res.status(201).json({ success: true, data: session });
+});
 
-    const decoded = jwt.verify(refresh_token, process.env.JWT_REFRESH_SECRET);
-    
-    // Verify user exists
-    const userResult = await pool.query(
-      'SELECT id, email, username, first_name, last_name FROM users WHERE id = $1',
-      [decoded.userId]
-    );
-
-    if (userResult.rows.length === 0) {
-      return res.status(401).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    const tokens = generateTokens(decoded.userId);
-
-    res.json({
-      success: true,
-      message: 'Tokens refreshed successfully',
-      data: {
-        access_token: tokens.accessToken,
-        refresh_token: tokens.refreshToken
-      }
-    });
-
-  } catch (error) {
-    console.error('Token refresh error:', error);
-    res.status(403).json({
-      success: false,
-      message: 'Invalid or expired refresh token'
-    });
+app.post('/api/sessions/:id/complete', (req, res) => {
+  const session = activeSessions[req.params.id];
+  if (!session) {
+    return res.status(404).json({ success: false, message: 'Session not found' });
   }
+  
+  session.status = 'completed';
+  session.end_time = new Date().toISOString();
+  delete activeSessions[req.params.id];
+  
+  res.json({ success: true, data: session });
 });
 
-// Get User Profile
-app.get('/api/auth/me', authenticateToken, (req, res) => {
-  res.json({
-    success: true,
-    data: {
-      user: req.user
-    }
-  });
+app.get('/api/sessions/:id/games', (req, res) => {
+  const sessionGames = Object.values(games).filter(g => g.session_id === req.params.id);
+  res.json({ success: true, data: sessionGames });
 });
 
-// Logout
-app.post('/api/auth/logout', authenticateToken, (req, res) => {
-  // In a production app, you'd typically blacklist the token
-  // For now, we'll just send a success response
-  res.json({
-    success: true,
-    message: 'Logged out successfully'
-  });
-});
-
-// ===== BANKROLL ROUTES =====
-
-// Get all bankrolls for user
-app.get('/api/bankrolls', authenticateToken, async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT 
-        id, name, initial_amount, current_amount, currency,
-        created_at, updated_at
-      FROM bankrolls 
-      WHERE user_id = $1 
-      ORDER BY created_at DESC
-    `, [req.user.id]);
-
-    res.json({
-      success: true,
-      data: result.rows
-    });
-
-  } catch (error) {
-    console.error('Get bankrolls error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching bankrolls'
-    });
+// Game endpoints
+app.post('/api/games', (req, res) => {
+  const gameId = Date.now().toString();
+  const game = {
+    id: gameId,
+    session_id: req.body.session_id,
+    name: req.body.name,
+    type: req.body.type,
+    status: 'running',
+    buy_in: parseFloat(req.body.buy_in),
+    entries: req.body.entries || 1,
+    winnings: 0.00,
+    start_time: new Date().toISOString()
+  };
+  
+  games[gameId] = game;
+  
+  // Update session stats
+  if (activeSessions[req.body.session_id]) {
+    activeSessions[req.body.session_id].total_games += 1;
+    activeSessions[req.body.session_id].total_buy_in += game.buy_in * game.entries;
   }
+  
+  res.status(201).json({ success: true, data: game });
 });
 
-// Create new bankroll
-app.post('/api/bankrolls', authenticateToken, async (req, res) => {
-  try {
-    const { name, initial_amount, currency = 'EUR' } = req.body;
-
-    if (!name || !initial_amount) {
-      return res.status(400).json({
-        success: false,
-        message: 'Name and initial amount are required'
-      });
-    }
-
-    const bankrollId = uuidv4();
-    const result = await pool.query(`
-      INSERT INTO bankrolls (id, user_id, name, initial_amount, current_amount, currency)
-      VALUES ($1, $2, $3, $4, $4, $5)
-      RETURNING *
-    `, [bankrollId, req.user.id, name, initial_amount, currency]);
-
-    res.status(201).json({
-      success: true,
-      data: result.rows[0]
-    });
-
-  } catch (error) {
-    console.error('Create bankroll error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error creating bankroll'
-    });
+app.put('/api/games/:id/entries', (req, res) => {
+  const game = games[req.params.id];
+  if (!game) {
+    return res.status(404).json({ success: false, message: 'Game not found' });
   }
-});
-
-// Update bankroll
-app.put('/api/bankrolls/:id', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { name, current_amount } = req.body;
-
-    const result = await pool.query(`
-      UPDATE bankrolls 
-      SET name = COALESCE($1, name),
-          current_amount = COALESCE($2, current_amount),
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = $3 AND user_id = $4
-      RETURNING *
-    `, [name, current_amount, id, req.user.id]);
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Bankroll not found'
-      });
-    }
-
-    res.json({
-      success: true,
-      data: result.rows[0]
-    });
-
-  } catch (error) {
-    console.error('Update bankroll error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error updating bankroll'
-    });
+  
+  const oldEntries = game.entries;
+  game.entries = req.body.entries;
+  
+  // Update session buy-in
+  if (activeSessions[game.session_id]) {
+    const buyInDiff = game.buy_in * (game.entries - oldEntries);
+    activeSessions[game.session_id].total_buy_in += buyInDiff;
   }
+  
+  res.json({ success: true, data: game });
 });
 
-// Delete bankroll
-app.delete('/api/bankrolls/:id', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const result = await pool.query(
-      'DELETE FROM bankrolls WHERE id = $1 AND user_id = $2 RETURNING id',
-      [id, req.user.id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Bankroll not found'
-      });
-    }
-
-    res.json({
-      success: true,
-      message: 'Bankroll deleted successfully'
-    });
-
-  } catch (error) {
-    console.error('Delete bankroll error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error deleting bankroll'
-    });
+app.post('/api/games/:id/complete', (req, res) => {
+  const game = games[req.params.id];
+  if (!game) {
+    return res.status(404).json({ success: false, message: 'Game not found' });
   }
-});
-
-// ===== SESSION ROUTES =====
-
-// Get all sessions for user
-app.get('/api/sessions', authenticateToken, async (req, res) => {
-  try {
-    const { status } = req.query;
-    
-    let query = `
-      SELECT s.*, b.name as bankroll_name
-      FROM sessions s
-      LEFT JOIN bankrolls b ON s.bankroll_id = b.id
-      WHERE s.user_id = $1
-    `;
-    const params = [req.user.id];
-
-    if (status) {
-      query += ' AND s.status = $2';
-      params.push(status);
-    }
-
-    query += ' ORDER BY s.created_at DESC';
-
-    const result = await pool.query(query, params);
-
-    res.json({
-      success: true,
-      data: result.rows
-    });
-
-  } catch (error) {
-    console.error('Get sessions error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching sessions'
-    });
+  
+  game.status = 'completed';
+  game.end_time = new Date().toISOString();
+  game.winnings = parseFloat(req.body.winnings || 0);
+  
+  // Update session stats
+  if (activeSessions[game.session_id]) {
+    activeSessions[game.session_id].total_winnings += game.winnings;
+    activeSessions[game.session_id].total_result = 
+      activeSessions[game.session_id].total_winnings - activeSessions[game.session_id].total_buy_in;
   }
+  
+  res.json({ success: true, data: game });
 });
 
-// Create new session
-app.post('/api/sessions', authenticateToken, async (req, res) => {
-  try {
-    const { 
-      bankroll_id, 
-      location, 
-      game_type, 
-      stakes, 
-      start_time = new Date().toISOString() 
-    } = req.body;
-
-    if (!bankroll_id) {
-      return res.status(400).json({
-        success: false,
-        message: 'Bankroll ID is required'
-      });
-    }
-
-    // Verify bankroll belongs to user
-    const bankrollCheck = await pool.query(
-      'SELECT id FROM bankrolls WHERE id = $1 AND user_id = $2',
-      [bankroll_id, req.user.id]
-    );
-
-    if (bankrollCheck.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Bankroll not found'
-      });
-    }
-
-    const sessionId = uuidv4();
-    const result = await pool.query(`
-      INSERT INTO sessions (
-        id, user_id, bankroll_id, location, game_type, stakes, 
-        start_time, status
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, 'running')
-      RETURNING *
-    `, [sessionId, req.user.id, bankroll_id, location, game_type, stakes, start_time]);
-
-    res.status(201).json({
-      success: true,
-      data: result.rows[0]
-    });
-
-  } catch (error) {
-    console.error('Create session error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error creating session'
-    });
+app.post('/api/games/:id/bust', (req, res) => {
+  const game = games[req.params.id];
+  if (!game) {
+    return res.status(404).json({ success: false, message: 'Game not found' });
   }
-});
-
-// Update session
-app.put('/api/sessions/:id', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const updates = req.body;
-    
-    // Build dynamic update query
-    const allowedFields = ['location', 'game_type', 'stakes', 'end_time', 'profit_loss', 'status', 'notes'];
-    const updateFields = [];
-    const updateValues = [];
-    let paramCount = 1;
-
-    Object.keys(updates).forEach(field => {
-      if (allowedFields.includes(field)) {
-        updateFields.push(`${field} = $${paramCount}`);
-        updateValues.push(updates[field]);
-        paramCount++;
-      }
-    });
-
-    if (updateFields.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'No valid fields to update'
-      });
-    }
-
-    updateFields.push('updated_at = CURRENT_TIMESTAMP');
-    updateValues.push(id, req.user.id);
-
-    const query = `
-      UPDATE sessions 
-      SET ${updateFields.join(', ')}
-      WHERE id = $${paramCount} AND user_id = $${paramCount + 1}
-      RETURNING *
-    `;
-
-    const result = await pool.query(query, updateValues);
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Session not found'
-      });
-    }
-
-    res.json({
-      success: true,
-      data: result.rows[0]
-    });
-
-  } catch (error) {
-    console.error('Update session error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error updating session'
-    });
-  }
-});
-
-// Complete session
-app.post('/api/sessions/:id/complete', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { profit_loss, end_time = new Date().toISOString(), notes } = req.body;
-
-    const result = await pool.query(`
-      UPDATE sessions 
-      SET status = 'completed',
-          end_time = $1,
-          profit_loss = $2,
-          notes = $3,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = $4 AND user_id = $5
-      RETURNING *
-    `, [end_time, profit_loss, notes, id, req.user.id]);
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Session not found'
-      });
-    }
-
-    // Update bankroll if profit/loss provided
-    if (profit_loss !== undefined && result.rows[0].bankroll_id) {
-      await pool.query(`
-        UPDATE bankrolls 
-        SET current_amount = current_amount + $1,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = $2 AND user_id = $3
-      `, [profit_loss, result.rows[0].bankroll_id, req.user.id]);
-    }
-
-    res.json({
-      success: true,
-      data: result.rows[0]
-    });
-
-  } catch (error) {
-    console.error('Complete session error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error completing session'
-    });
-  }
-});
-
-// Get games for session
-app.get('/api/sessions/:id/games', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    // Verify session belongs to user
-    const sessionCheck = await pool.query(
-      'SELECT id FROM sessions WHERE id = $1 AND user_id = $2',
-      [id, req.user.id]
-    );
-
-    if (sessionCheck.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Session not found'
-      });
-    }
-
-    const result = await pool.query(`
-      SELECT * FROM games 
-      WHERE session_id = $1 
-      ORDER BY created_at DESC
-    `, [id]);
-
-    res.json({
-      success: true,
-      data: result.rows
-    });
-
-  } catch (error) {
-    console.error('Get session games error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching session games'
-    });
-  }
-});
-
-// ===== GAME ROUTES =====
-
-// Get all games for user
-app.get('/api/games', authenticateToken, async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT g.*, s.location, s.game_type, s.stakes
-      FROM games g
-      LEFT JOIN sessions s ON g.session_id = s.id
-      WHERE g.user_id = $1
-      ORDER BY g.created_at DESC
-    `, [req.user.id]);
-
-    res.json({
-      success: true,
-      data: result.rows
-    });
-
-  } catch (error) {
-    console.error('Get games error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching games'
-    });
-  }
-});
-
-// Create new game
-app.post('/api/games', authenticateToken, async (req, res) => {
-  try {
-    const { 
-      session_id, 
-      buy_in, 
-      entries = 1,
-      start_time = new Date().toISOString() 
-    } = req.body;
-
-    if (!session_id || !buy_in) {
-      return res.status(400).json({
-        success: false,
-        message: 'Session ID and buy-in are required'
-      });
-    }
-
-    // Verify session belongs to user
-    const sessionCheck = await pool.query(
-      'SELECT id FROM sessions WHERE id = $1 AND user_id = $2',
-      [session_id, req.user.id]
-    );
-
-    if (sessionCheck.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Session not found'
-      });
-    }
-
-    const gameId = uuidv4();
-    const result = await pool.query(`
-      INSERT INTO games (
-        id, user_id, session_id, buy_in, entries, start_time, status
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, 'running')
-      RETURNING *
-    `, [gameId, req.user.id, session_id, buy_in, entries, start_time]);
-
-    res.status(201).json({
-      success: true,
-      data: result.rows[0]
-    });
-
-  } catch (error) {
-    console.error('Create game error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error creating game'
-    });
-  }
-});
-
-// Update game
-app.put('/api/games/:id', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const updates = req.body;
-    
-    const allowedFields = ['buy_in', 'cash_out', 'entries', 'position', 'end_time', 'status', 'notes'];
-    const updateFields = [];
-    const updateValues = [];
-    let paramCount = 1;
-
-    Object.keys(updates).forEach(field => {
-      if (allowedFields.includes(field)) {
-        updateFields.push(`${field} = $${paramCount}`);
-        updateValues.push(updates[field]);
-        paramCount++;
-      }
-    });
-
-    if (updateFields.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'No valid fields to update'
-      });
-    }
-
-    updateFields.push('updated_at = CURRENT_TIMESTAMP');
-    updateValues.push(id, req.user.id);
-
-    const query = `
-      UPDATE games 
-      SET ${updateFields.join(', ')}
-      WHERE id = $${paramCount} AND user_id = $${paramCount + 1}
-      RETURNING *
-    `;
-
-    const result = await pool.query(query, updateValues);
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Game not found'
-      });
-    }
-
-    res.json({
-      success: true,
-      data: result.rows[0]
-    });
-
-  } catch (error) {
-    console.error('Update game error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error updating game'
-    });
-  }
-});
-
-// Complete game
-app.post('/api/games/:id/complete', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { 
-      cash_out = 0, 
-      position, 
-      end_time = new Date().toISOString(),
-      notes 
-    } = req.body;
-
-    const result = await pool.query(`
-      UPDATE games 
-      SET status = 'completed',
-          cash_out = $1,
-          position = $2,
-          end_time = $3,
-          notes = $4,
-          profit_loss = $1 - buy_in,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = $5 AND user_id = $6
-      RETURNING *
-    `, [cash_out, position, end_time, notes, id, req.user.id]);
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Game not found'
-      });
-    }
-
-    res.json({
-      success: true,
-      data: result.rows[0]
-    });
-
-  } catch (error) {
-    console.error('Complete game error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error completing game'
-    });
-  }
-});
-
-// Bust game (special case of completion)
-app.post('/api/games/:id/bust', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { end_time = new Date().toISOString(), notes } = req.body;
-
-    const result = await pool.query(`
-      UPDATE games 
-      SET status = 'busted',
-          cash_out = 0,
-          end_time = $1,
-          notes = $2,
-          profit_loss = 0 - buy_in,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = $3 AND user_id = $4
-      RETURNING *
-    `, [end_time, notes, id, req.user.id]);
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Game not found'
-      });
-    }
-
-    res.json({
-      success: true,
-      data: result.rows[0]
-    });
-
-  } catch (error) {
-    console.error('Bust game error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error busting game'
-    });
-  }
-});
-
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({
-    success: false,
-    message: 'Internal server error'
-  });
+  
+  game.status = 'busted';
+  game.end_time = new Date().toISOString();
+  game.winnings = 0;
+  
+  res.json({ success: true, data: game });
 });
 
 // 404 handler
 app.use('*', (req, res) => {
   res.status(404).json({
     success: false,
-    message: 'API endpoint not found'
+    message: 'Endpoint not found',
+    path: req.originalUrl
   });
 });
 
+// Error handler
+app.use((error, req, res, next) => {
+  console.error('Error:', error);
+  res.status(500).json({
+    success: false,
+    message: 'Internal server error',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Add this to your server.js temporarily for database setup
+// ADD AFTER line ~500 (before app.listen)
+
+// ONE-TIME DATABASE SETUP ENDPOINT
+app.get('/setup-database', async (req, res) => {
+  try {
+    console.log('🔧 Setting up database schema...');
+    
+    // Enable UUID extension
+    await pool.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
+    
+    // Users table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        email VARCHAR(255) UNIQUE NOT NULL,
+        username VARCHAR(100) UNIQUE NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        first_name VARCHAR(100),
+        last_name VARCHAR(100),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    // Bankrolls table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bankrolls (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name VARCHAR(255) NOT NULL,
+        initial_amount DECIMAL(15,2) NOT NULL DEFAULT 0,
+        current_amount DECIMAL(15,2) NOT NULL DEFAULT 0,
+        currency VARCHAR(3) DEFAULT 'EUR',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    // Sessions table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        bankroll_id UUID REFERENCES bankrolls(id) ON DELETE SET NULL,
+        location VARCHAR(255),
+        game_type VARCHAR(100),
+        stakes VARCHAR(100),
+        start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        end_time TIMESTAMP,
+        profit_loss DECIMAL(15,2) DEFAULT 0,
+        status VARCHAR(20) DEFAULT 'running',
+        notes TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    // Games table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS games (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
+        buy_in DECIMAL(15,2) NOT NULL DEFAULT 0,
+        cash_out DECIMAL(15,2) DEFAULT 0,
+        profit_loss DECIMAL(15,2) DEFAULT 0,
+        entries INTEGER DEFAULT 1,
+        position INTEGER,
+        start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        end_time TIMESTAMP,
+        status VARCHAR(20) DEFAULT 'running',
+        notes TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    // Create indexes
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)');
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)');
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_bankrolls_user_id ON bankrolls(user_id)');
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)');
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_games_user_id ON games(user_id)');
+    
+    console.log('✅ Database setup completed successfully!');
+    
+    res.json({
+      success: true,
+      message: 'Database setup completed successfully!',
+      tables_created: ['users', 'bankrolls', 'sessions', 'games'],
+      indexes_created: 5
+    });
+    
+  } catch (error) {
+    console.error('❌ Database setup failed:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Database setup failed',
+      error: error.message
+    });
+  }
+});
+
+// Remove this endpoint after setup is complete!
+
 app.listen(PORT, () => {
-  console.log(`🚀 BankrollGod Production Backend running on port ${PORT}`);
-  console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+  console.log('🚀 ================================');
+  console.log('🎮 Poker Tracker Backend (Production)');
+  console.log(`📡 Server running on port ${PORT}`);
+  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'production'}`);
+  console.log(`🗄️ Database: PostgreSQL (Ready)`);
+  console.log('🚀 ================================');
 });
 
 module.exports = app;
