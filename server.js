@@ -2,10 +2,17 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const { Pool } = require('pg'); // ← ADD THIS
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// ← ADD DATABASE CONNECTION
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
 
 // Security
 app.use(helmet({
@@ -30,7 +37,6 @@ app.use(rateLimit({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-
 // Health check
 app.get('/', (req, res) => {
   res.json({
@@ -44,14 +50,84 @@ app.get('/', (req, res) => {
   });
 });
 
-app.get('/api/health', (req, res) => {
-  res.json({
-    success: true,
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    environment: process.env.NODE_ENV || 'production'
-  });
+// ← ADD THIS: Main health endpoint (without /api)
+app.get('/health', async (req, res) => {
+  try {
+    // Test database connection
+    const client = await pool.connect();
+    const result = await client.query('SELECT NOW() as current_time');
+    
+    // Check if tables exist
+    const tableCheck = await client.query(`
+      SELECT COUNT(*) as count 
+      FROM information_schema.tables 
+      WHERE table_schema = 'public' 
+      AND table_name IN ('users', 'bankrolls', 'sessions', 'games')
+    `);
+    
+    client.release();
+    
+    const tablesExist = parseInt(tableCheck.rows[0].count) >= 4;
+    
+    res.status(200).json({
+      success: true,
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      service: 'BankrollGod Backend',
+      database: {
+        connected: true,
+        server_time: result.rows[0].current_time,
+        tables_ready: tablesExist,
+        tables_count: parseInt(tableCheck.rows[0].count)
+      },
+      server: {
+        uptime: Math.floor(process.uptime()),
+        memory_mb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+        node_version: process.version,
+        environment: process.env.NODE_ENV || 'production'
+      }
+    });
+    
+  } catch (error) {
+    console.error('Health check failed:', error);
+    
+    res.status(503).json({
+      success: false,
+      status: 'unhealthy',
+      timestamp: new Date().toISOString(),
+      error: error.message,
+      database: {
+        connected: false
+      }
+    });
+  }
+});
+
+// Keep existing /api/health for compatibility
+app.get('/api/health', async (req, res) => {
+  try {
+    const client = await pool.connect();
+    const result = await client.query('SELECT NOW() as current_time');
+    client.release();
+    
+    res.json({
+      success: true,
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      environment: process.env.NODE_ENV || 'production',
+      database: {
+        connected: true,
+        server_time: result.rows[0].current_time
+      }
+    });
+  } catch (error) {
+    res.status(503).json({
+      success: false,
+      status: 'unhealthy',
+      error: error.message
+    });
+  }
 });
 
 // Production Mock APIs (will be replaced with real database)
@@ -233,27 +309,6 @@ app.post('/api/games/:id/bust', (req, res) => {
   res.json({ success: true, data: game });
 });
 
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({
-    success: false,
-    message: 'Endpoint not found',
-    path: req.originalUrl
-  });
-});
-
-// Error handler
-app.use((error, req, res, next) => {
-  console.error('Error:', error);
-  res.status(500).json({
-    success: false,
-    message: 'Internal server error',
-    timestamp: new Date().toISOString()
-  });
-});
-
-// Add this BEFORE the app.listen() line at the end of server.js:
-
 // ONE-TIME DATABASE SETUP ENDPOINT
 app.get('/setup-database', async (req, res) => {
   try {
@@ -347,14 +402,55 @@ app.get('/setup-database', async (req, res) => {
   }
 });
 
-// Keep existing app.listen() below this
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'Endpoint not found',
+    path: req.originalUrl,
+    available_endpoints: [
+      'GET /',
+      'GET /health',
+      'GET /api/health',
+      'GET /setup-database',
+      'GET /api/bankrolls',
+      'GET /api/sessions/active'
+    ]
+  });
+});
+
+// Error handler
+app.use((error, req, res, next) => {
+  console.error('Error:', error);
+  res.status(500).json({
+    success: false,
+    message: 'Internal server error',
+    timestamp: new Date().toISOString()
+  });
+});
+
 app.listen(PORT, () => {
   console.log('🚀 ================================');
   console.log('🎮 Poker Tracker Backend (Production)');
   console.log(`📡 Server running on port ${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'production'}`);
   console.log(`🗄️ Database: PostgreSQL (Ready)`);
+  console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+  console.log(`⚙️  Setup database: http://localhost:${PORT}/setup-database`);
   console.log('🚀 ================================');
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('\n🛑 Shutting down server...');
+  await pool.end();
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  console.log('\n🛑 Shutting down server...');
+  await pool.end();
+  process.exit(0);
 });
 
 module.exports = app;
