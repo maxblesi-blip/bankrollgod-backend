@@ -1,0 +1,27 @@
+# node modules
+node_modules/
+
+# log files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# environment variables
+.env
+
+# build output
+dist/
+build/
+
+# local IDE files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# system files
+.DS_Store
+Thumbs.db
+
+# uploads folder (optional – wenn du keine Beispielbilder einchecken willst)
+uploads/
