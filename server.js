@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
+const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
@@ -31,6 +32,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 if (process.env.NODE_ENV !== 'test') {
+  app.use(morgan('combined'));
 }
 
 // Health check
@@ -254,8 +256,7 @@ app.use((error, req, res, next) => {
   });
 });
 
-// Add this to your server.js temporarily for database setup
-// ADD AFTER line ~500 (before app.listen)
+// Add this BEFORE the app.listen() line at the end of server.js:
 
 // ONE-TIME DATABASE SETUP ENDPOINT
 app.get('/setup-database', async (req, res) => {
@@ -332,20 +333,12 @@ app.get('/setup-database', async (req, res) => {
       )
     `);
     
-    // Create indexes
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_bankrolls_user_id ON bankrolls(user_id)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_games_user_id ON games(user_id)');
-    
     console.log('✅ Database setup completed successfully!');
     
     res.json({
       success: true,
       message: 'Database setup completed successfully!',
-      tables_created: ['users', 'bankrolls', 'sessions', 'games'],
-      indexes_created: 5
+      tables_created: ['users', 'bankrolls', 'sessions', 'games']
     });
     
   } catch (error) {
@@ -358,8 +351,7 @@ app.get('/setup-database', async (req, res) => {
   }
 });
 
-// Remove this endpoint after setup is complete!
-
+// Keep existing app.listen() below this
 app.listen(PORT, () => {
   console.log('🚀 ================================');
   console.log('🎮 Poker Tracker Backend (Production)');
