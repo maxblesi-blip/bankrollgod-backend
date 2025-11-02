@@ -2,13 +2,18 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const { Pool } = require('pg'); // ← ADD THIS
+const { Pool } = require('pg');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// ← ADD DATABASE CONNECTION
+// JWT Secret
+const JWT_SECRET = process.env.JWT_SECRET || 'bankrollgod-jwt-secret-change-in-production';
+
+// Database Connection
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
@@ -19,7 +24,7 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
 
-// CORS - Allow all origins for now (configure later)
+// CORS
 app.use(cors({
   origin: true,
   credentials: true,
@@ -37,27 +42,315 @@ app.use(rateLimit({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Health check
+// =============================================================================
+// AUTH MIDDLEWARE
+// =============================================================================
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({
+      success: false,
+      message: 'Access token required'
+    });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({
+        success: false,
+        message: 'Invalid or expired token'
+      });
+    }
+    req.user = user;
+    next();
+  });
+};
+
+// =============================================================================
+// AUTHENTICATION ENDPOINTS
+// =============================================================================
+
+// REGISTER
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { username, email, password, firstName, lastName } = req.body;
+
+    if (!username || !email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Username, email, and password are required'
+      });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must be at least 6 characters long'
+      });
+    }
+
+    const existingUser = await pool.query(
+      'SELECT id FROM users WHERE email = $1 OR username = $2',
+      [email, username]
+    );
+
+    if (existingUser.rows.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: 'User with this email or username already exists'
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 12);
+
+    const newUser = await pool.query(
+      `INSERT INTO users (username, email, password_hash, first_name, last_name) 
+       VALUES ($1, $2, $3, $4, $5) 
+       RETURNING id, username, email, first_name, last_name, created_at`,
+      [username, email, hashedPassword, firstName || null, lastName || null]
+    );
+
+    const user = newUser.rows[0];
+
+    const token = jwt.sign(
+      { 
+        userId: user.id, 
+        username: user.username,
+        email: user.email 
+      },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    await pool.query(
+      `INSERT INTO bankrolls (user_id, name, initial_amount, current_amount) 
+       VALUES ($1, $2, $3, $4)`,
+      [user.id, 'Main Bankroll', 0, 0]
+    );
+
+    console.log(`✅ New user registered: ${user.username} (${user.email})`);
+
+    res.status(201).json({
+      success: true,
+      message: 'User registered successfully',
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        firstName: user.first_name,
+        lastName: user.last_name,
+        createdAt: user.created_at
+      },
+      token
+    });
+
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Registration failed: ' + error.message
+    });
+  }
+});
+
+// LOGIN
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email and password are required'
+      });
+    }
+
+    const userResult = await pool.query(
+      'SELECT id, username, email, password_hash, first_name, last_name FROM users WHERE email = $1 OR username = $1',
+      [email]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
+    }
+
+    const user = userResult.rows[0];
+
+    const isValidPassword = await bcrypt.compare(password, user.password_hash);
+
+    if (!isValidPassword) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
+    }
+
+    const token = jwt.sign(
+      { 
+        userId: user.id, 
+        username: user.username,
+        email: user.email 
+      },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    await pool.query(
+      'UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
+      [user.id]
+    );
+
+    console.log(`✅ User logged in: ${user.username} (${user.email})`);
+
+    res.json({
+      success: true,
+      message: 'Login successful',
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        firstName: user.first_name,
+        lastName: user.last_name
+      },
+      token
+    });
+
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Login failed: ' + error.message
+    });
+  }
+});
+
+// GET CURRENT USER
+app.get('/api/auth/me', authenticateToken, async (req, res) => {
+  try {
+    const userResult = await pool.query(
+      'SELECT id, username, email, first_name, last_name, created_at FROM users WHERE id = $1',
+      [req.user.userId]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    const user = userResult.rows[0];
+
+    res.json({
+      success: true,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        firstName: user.first_name,
+        lastName: user.last_name,
+        createdAt: user.created_at
+      }
+    });
+
+  } catch (error) {
+    console.error('Get current user error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get user data'
+    });
+  }
+});
+
+// LOGOUT
+app.post('/api/auth/logout', authenticateToken, (req, res) => {
+  console.log(`✅ User logged out: ${req.user.username}`);
+  res.json({
+    success: true,
+    message: 'Logout successful'
+  });
+});
+
+// CREATE DEMO USER
+app.get('/api/create-demo-user', async (req, res) => {
+  try {
+    const existingDemo = await pool.query(
+      'SELECT id FROM users WHERE email = $1',
+      ['demo@bankrollgod.com']
+    );
+
+    if (existingDemo.rows.length > 0) {
+      return res.json({
+        success: true,
+        message: 'Demo user already exists! Use these credentials:',
+        credentials: {
+          email: 'demo@bankrollgod.com',
+          password: 'demo123'
+        }
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash('demo123', 12);
+    const demoUser = await pool.query(
+      `INSERT INTO users (username, email, password_hash, first_name, last_name) 
+       VALUES ($1, $2, $3, $4, $5) 
+       RETURNING id, username, email`,
+      ['demouser', 'demo@bankrollgod.com', hashedPassword, 'Demo', 'User']
+    );
+
+    await pool.query(
+      `INSERT INTO bankrolls (user_id, name, initial_amount, current_amount) 
+       VALUES ($1, $2, $3, $4)`,
+      [demoUser.rows[0].id, 'Demo Bankroll', 1000, 1250]
+    );
+
+    res.json({
+      success: true,
+      message: 'Demo user created successfully! Login with:',
+      credentials: {
+        email: 'demo@bankrollgod.com',
+        password: 'demo123'
+      }
+    });
+
+  } catch (error) {
+    console.error('Create demo user error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create demo user: ' + error.message
+    });
+  }
+});
+
+// =============================================================================
+// HEALTH CHECK ENDPOINTS
+// =============================================================================
+
+// Root
 app.get('/', (req, res) => {
   res.json({
     success: true,
-    message: 'Poker Tracker Backend API',
+    message: 'BankrollGod Backend API',
     version: '1.0.0',
     status: 'running',
     environment: process.env.NODE_ENV || 'production',
     database: 'PostgreSQL',
+    authentication: 'JWT',
     timestamp: new Date().toISOString()
   });
 });
 
-// ← ADD THIS: Main health endpoint (without /api)
+// Health Check
 app.get('/health', async (req, res) => {
   try {
-    // Test database connection
     const client = await pool.connect();
     const result = await client.query('SELECT NOW() as current_time');
     
-    // Check if tables exist
     const tableCheck = await client.query(`
       SELECT COUNT(*) as count 
       FROM information_schema.tables 
@@ -103,7 +396,7 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// Keep existing /api/health for compatibility
+// API Health Check
 app.get('/api/health', async (req, res) => {
   try {
     const client = await pool.connect();
@@ -130,194 +423,190 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
-// Production Mock APIs (will be replaced with real database)
-const mockBankrolls = [
-  {
-    id: '1',
-    name: 'Online NL200',
-    type: 'online',
-    starting_amount: 2000.00,
-    current_amount: 2500.00,
-    goal_amount: 5000.00,
-    total_sessions: 5,
-    total_games: 12,
-    win_rate: 75.5,
-    roi: 15.3,
-    created_at: new Date().toISOString()
-  },
-  {
-    id: '2',
-    name: 'Live 2/5',
-    type: 'live', 
-    starting_amount: 3000.00,
-    current_amount: 3800.00,
-    goal_amount: 10000.00,
-    total_sessions: 8,
-    total_games: 8,
-    win_rate: 62.5,
-    roi: 26.7,
-    created_at: new Date().toISOString()
-  },
-  {
-    id: '3',
-    name: 'Tournament Bankroll',
-    type: 'online',
-    starting_amount: 1000.00,
-    current_amount: 1350.00,
-    goal_amount: 3000.00,
-    total_sessions: 12,
-    total_games: 45,
-    win_rate: 33.3,
-    roi: 35.0,
-    created_at: new Date().toISOString()
+// =============================================================================
+// PROTECTED API ENDPOINTS
+// =============================================================================
+
+// Bankrolls (Protected)
+app.get('/api/bankrolls', authenticateToken, async (req, res) => {
+  try {
+    const bankrollsResult = await pool.query(
+      `SELECT b.*, 
+              COUNT(s.id) as total_sessions,
+              COALESCE(SUM(s.profit_loss), 0) as total_profit_loss
+       FROM bankrolls b
+       LEFT JOIN sessions s ON b.id = s.bankroll_id AND s.status = 'completed'
+       WHERE b.user_id = $1 
+       GROUP BY b.id
+       ORDER BY b.created_at DESC`,
+      [req.user.userId]
+    );
+
+    res.json({ 
+      success: true, 
+      data: bankrollsResult.rows 
+    });
+
+  } catch (error) {
+    console.error('Get bankrolls error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get bankrolls: ' + error.message
+    });
   }
-];
-
-let activeSessions = {};
-let games = {};
-
-// Bankroll endpoints
-app.get('/api/bankrolls', (req, res) => {
-  res.json({ success: true, data: mockBankrolls });
 });
 
-app.get('/api/bankrolls/:id', (req, res) => {
-  const bankroll = mockBankrolls.find(b => b.id === req.params.id);
-  if (!bankroll) {
-    return res.status(404).json({ success: false, message: 'Bankroll not found' });
+app.get('/api/bankrolls/:id', authenticateToken, async (req, res) => {
+  try {
+    const bankrollResult = await pool.query(
+      'SELECT * FROM bankrolls WHERE id = $1 AND user_id = $2',
+      [req.params.id, req.user.userId]
+    );
+
+    if (bankrollResult.rows.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Bankroll not found' 
+      });
+    }
+
+    res.json({ 
+      success: true, 
+      data: bankrollResult.rows[0] 
+    });
+
+  } catch (error) {
+    console.error('Get bankroll error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get bankroll: ' + error.message
+    });
   }
-  res.json({ success: true, data: bankroll });
 });
 
-// Session endpoints
-app.get('/api/sessions/active', (req, res) => {
-  const sessions = Object.values(activeSessions);
-  res.json({ success: true, data: sessions });
-});
+// Sessions (Protected)
+app.get('/api/sessions/active', authenticateToken, async (req, res) => {
+  try {
+    const sessionsResult = await pool.query(
+      `SELECT s.*, b.name as bankroll_name 
+       FROM sessions s
+       LEFT JOIN bankrolls b ON s.bankroll_id = b.id
+       WHERE s.user_id = $1 AND s.status = $2 
+       ORDER BY s.start_time DESC`,
+      [req.user.userId, 'running']
+    );
 
-app.post('/api/sessions', (req, res) => {
-  const sessionId = Date.now().toString();
-  const session = {
-    id: sessionId,
-    name: req.body.name,
-    bankroll_id: req.body.bankroll_id,
-    status: 'running',
-    start_time: new Date().toISOString(),
-    total_games: 0,
-    total_buy_in: 0.00,
-    total_winnings: 0.00,
-    total_result: 0.00,
-    location: req.body.location || 'Online'
-  };
-  
-  activeSessions[sessionId] = session;
-  res.status(201).json({ success: true, data: session });
-});
+    res.json({ 
+      success: true, 
+      data: sessionsResult.rows 
+    });
 
-app.post('/api/sessions/:id/complete', (req, res) => {
-  const session = activeSessions[req.params.id];
-  if (!session) {
-    return res.status(404).json({ success: false, message: 'Session not found' });
+  } catch (error) {
+    console.error('Get active sessions error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get active sessions: ' + error.message
+    });
   }
-  
-  session.status = 'completed';
-  session.end_time = new Date().toISOString();
-  delete activeSessions[req.params.id];
-  
-  res.json({ success: true, data: session });
 });
 
-app.get('/api/sessions/:id/games', (req, res) => {
-  const sessionGames = Object.values(games).filter(g => g.session_id === req.params.id);
-  res.json({ success: true, data: sessionGames });
+app.post('/api/sessions', authenticateToken, async (req, res) => {
+  try {
+    const { bankroll_id, location, game_type, stakes, notes } = req.body;
+
+    const newSession = await pool.query(
+      `INSERT INTO sessions (user_id, bankroll_id, location, game_type, stakes, notes) 
+       VALUES ($1, $2, $3, $4, $5, $6) 
+       RETURNING *`,
+      [req.user.userId, bankroll_id, location, game_type, stakes, notes]
+    );
+
+    res.status(201).json({ 
+      success: true, 
+      data: newSession.rows[0] 
+    });
+
+  } catch (error) {
+    console.error('Create session error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create session: ' + error.message
+    });
+  }
 });
 
-// Game endpoints
-app.post('/api/games', (req, res) => {
-  const gameId = Date.now().toString();
-  const game = {
-    id: gameId,
-    session_id: req.body.session_id,
-    name: req.body.name,
-    type: req.body.type,
-    status: 'running',
-    buy_in: parseFloat(req.body.buy_in),
-    entries: req.body.entries || 1,
-    winnings: 0.00,
-    start_time: new Date().toISOString()
-  };
-  
-  games[gameId] = game;
-  
-  // Update session stats
-  if (activeSessions[req.body.session_id]) {
-    activeSessions[req.body.session_id].total_games += 1;
-    activeSessions[req.body.session_id].total_buy_in += game.buy_in * game.entries;
+app.post('/api/sessions/:id/complete', authenticateToken, async (req, res) => {
+  try {
+    const { finalData } = req.body;
+
+    const session = await pool.query(
+      'SELECT * FROM sessions WHERE id = $1 AND user_id = $2',
+      [req.params.id, req.user.userId]
+    );
+
+    if (session.rows.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Session not found' 
+      });
+    }
+
+    const updatedSession = await pool.query(
+      `UPDATE sessions 
+       SET status = 'completed', end_time = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1 AND user_id = $2
+       RETURNING *`,
+      [req.params.id, req.user.userId]
+    );
+
+    res.json({ 
+      success: true, 
+      data: updatedSession.rows[0] 
+    });
+
+  } catch (error) {
+    console.error('Complete session error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to complete session: ' + error.message
+    });
   }
-  
-  res.status(201).json({ success: true, data: game });
 });
 
-app.put('/api/games/:id/entries', (req, res) => {
-  const game = games[req.params.id];
-  if (!game) {
-    return res.status(404).json({ success: false, message: 'Game not found' });
+app.get('/api/sessions/:id/games', authenticateToken, async (req, res) => {
+  try {
+    const gamesResult = await pool.query(
+      `SELECT g.* FROM games g
+       JOIN sessions s ON g.session_id = s.id
+       WHERE s.id = $1 AND s.user_id = $2
+       ORDER BY g.start_time DESC`,
+      [req.params.id, req.user.userId]
+    );
+
+    res.json({ 
+      success: true, 
+      data: gamesResult.rows 
+    });
+
+  } catch (error) {
+    console.error('Get session games error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get session games: ' + error.message
+    });
   }
-  
-  const oldEntries = game.entries;
-  game.entries = req.body.entries;
-  
-  // Update session buy-in
-  if (activeSessions[game.session_id]) {
-    const buyInDiff = game.buy_in * (game.entries - oldEntries);
-    activeSessions[game.session_id].total_buy_in += buyInDiff;
-  }
-  
-  res.json({ success: true, data: game });
 });
 
-app.post('/api/games/:id/complete', (req, res) => {
-  const game = games[req.params.id];
-  if (!game) {
-    return res.status(404).json({ success: false, message: 'Game not found' });
-  }
-  
-  game.status = 'completed';
-  game.end_time = new Date().toISOString();
-  game.winnings = parseFloat(req.body.winnings || 0);
-  
-  // Update session stats
-  if (activeSessions[game.session_id]) {
-    activeSessions[game.session_id].total_winnings += game.winnings;
-    activeSessions[game.session_id].total_result = 
-      activeSessions[game.session_id].total_winnings - activeSessions[game.session_id].total_buy_in;
-  }
-  
-  res.json({ success: true, data: game });
-});
+// =============================================================================
+// DATABASE SETUP ENDPOINT
+// =============================================================================
 
-app.post('/api/games/:id/bust', (req, res) => {
-  const game = games[req.params.id];
-  if (!game) {
-    return res.status(404).json({ success: false, message: 'Game not found' });
-  }
-  
-  game.status = 'busted';
-  game.end_time = new Date().toISOString();
-  game.winnings = 0;
-  
-  res.json({ success: true, data: game });
-});
-
-// ONE-TIME DATABASE SETUP ENDPOINT
 app.get('/setup-database', async (req, res) => {
   try {
     console.log('🔧 Setting up database schema...');
     
-    // Enable UUID extension
     await pool.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
     
-    // Users table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -331,7 +620,6 @@ app.get('/setup-database', async (req, res) => {
       )
     `);
     
-    // Bankrolls table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS bankrolls (
         id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -345,7 +633,6 @@ app.get('/setup-database', async (req, res) => {
       )
     `);
     
-    // Sessions table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS sessions (
         id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -364,7 +651,6 @@ app.get('/setup-database', async (req, res) => {
       )
     `);
     
-    // Games table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS games (
         id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -402,6 +688,10 @@ app.get('/setup-database', async (req, res) => {
   }
 });
 
+// =============================================================================
+// ERROR HANDLERS
+// =============================================================================
+
 // 404 handler
 app.use('*', (req, res) => {
   res.status(404).json({
@@ -412,6 +702,11 @@ app.use('*', (req, res) => {
       'GET /',
       'GET /health',
       'GET /api/health',
+      'POST /api/auth/login',
+      'POST /api/auth/register',
+      'GET /api/auth/me',
+      'POST /api/auth/logout',
+      'GET /api/create-demo-user',
       'GET /setup-database',
       'GET /api/bankrolls',
       'GET /api/sessions/active'
@@ -421,7 +716,7 @@ app.use('*', (req, res) => {
 
 // Error handler
 app.use((error, req, res, next) => {
-  console.error('Error:', error);
+  console.error('Unhandled error:', error);
   res.status(500).json({
     success: false,
     message: 'Internal server error',
@@ -429,14 +724,20 @@ app.use((error, req, res, next) => {
   });
 });
 
+// =============================================================================
+// SERVER START
+// =============================================================================
+
 app.listen(PORT, () => {
   console.log('🚀 ================================');
-  console.log('🎮 Poker Tracker Backend (Production)');
+  console.log('🎮 BankrollGod Backend (Production)');
   console.log(`📡 Server running on port ${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'production'}`);
   console.log(`🗄️ Database: PostgreSQL (Ready)`);
+  console.log(`🔐 Authentication: JWT (Ready)`);
   console.log(`🔗 Health check: http://localhost:${PORT}/health`);
   console.log(`⚙️  Setup database: http://localhost:${PORT}/setup-database`);
+  console.log(`👤 Create demo user: http://localhost:${PORT}/api/create-demo-user`);
   console.log('🚀 ================================');
 });
 
