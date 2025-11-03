@@ -15,7 +15,7 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // JWT Secret
-const JWT_SECRET = process.env.JWT_SECRET || 'bankrollgod-jwt-secret-change-in-production';
+const JWT_SECRET = process.env.JWT_SECRET || 'bankrollgod-jwt-secret-production-2024-secure';
 
 // Database Connection
 const pool = new Pool({
