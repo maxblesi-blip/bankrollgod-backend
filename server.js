@@ -233,11 +233,15 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// GET CURRENT USER
-app.get('/api/auth/me', authenticateToken, async (req, res) => {
+// =============================================================================
+// USER PROFILE ENDPOINTS
+// =============================================================================
+
+// GET - Get current user profile
+app.get('/api/users/profile', authenticateToken, async (req, res) => {
   try {
     const userResult = await pool.query(
-      'SELECT id, username, email, first_name, last_name, created_at FROM users WHERE id = $1',
+      'SELECT id, username, email, first_name, last_name, nickname, profile_public, show_stats, allow_messages, data_sharing, created_at FROM users WHERE id = $1',
       [req.user.userId]
     );
 
@@ -249,84 +253,205 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
     }
 
     const user = userResult.rows[0];
-
     res.json({
       success: true,
       user: {
         id: user.id,
         username: user.username,
         email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        nickname: user.nickname,
+        profilePublic: user.profile_public,
+        showStats: user.show_stats,
+        allowMessages: user.allow_messages,
+        dataSharing: user.data_sharing,
+        createdAt: user.created_at
+      }
+    });
+  } catch (error) {
+    console.error('Get profile error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// PUT - Update user profile
+app.put('/api/users/profile', authenticateToken, async (req, res) => {
+  try {
+    const { username, nickname, email, first_name, last_name } = req.body;
+    const userId = req.user.userId;
+
+    if (!username || !email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Username and email are required'
+      });
+    }
+
+    // Check if username/email already exists (exclude current user)
+    const existingUser = await pool.query(
+      'SELECT id FROM users WHERE (email = $1 OR username = $2) AND id != $3',
+      [email, username, userId]
+    );
+
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Username or email already exists'
+      });
+    }
+
+    const updatedUser = await pool.query(
+      `UPDATE users 
+       SET username = $1, nickname = $2, email = $3, first_name = $4, last_name = $5, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $6
+       RETURNING id, username, email, first_name, last_name, nickname, created_at`,
+      [username, nickname, email, first_name, last_name, userId]
+    );
+
+    if (updatedUser.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    const user = updatedUser.rows[0];
+    res.json({
+      success: true,
+      message: 'Profile updated successfully',
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
         firstName: user.first_name,
         lastName: user.last_name,
+        nickname: user.nickname,
         createdAt: user.created_at
       }
     });
 
   } catch (error) {
-    console.error('Get current user error:', error);
+    console.error('Profile update error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to get user data'
+      message: 'Server error'
     });
   }
 });
 
-// LOGOUT
-app.post('/api/auth/logout', authenticateToken, (req, res) => {
-  console.log(`✅ User logged out: ${req.user.username}`);
-  res.json({
-    success: true,
-    message: 'Logout successful'
-  });
-});
-
-// CREATE DEMO USER
-app.get('/api/create-demo-user', async (req, res) => {
+// PUT - Change password
+app.put('/api/users/change-password', authenticateToken, async (req, res) => {
   try {
-    const existingDemo = await pool.query(
-      'SELECT id FROM users WHERE email = $1',
-      ['demo@bankrollgod.com']
-    );
+    const { currentPassword, newPassword } = req.body;
+    const userId = req.user.userId;
 
-    if (existingDemo.rows.length > 0) {
-      return res.json({
-        success: true,
-        message: 'Demo user already exists! Use these credentials:',
-        credentials: {
-          email: 'demo@bankrollgod.com',
-          password: 'demo123'
-        }
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Current password and new password are required'
       });
     }
 
-    const hashedPassword = await bcrypt.hash('demo123', 12);
-    const demoUser = await pool.query(
-      `INSERT INTO users (username, email, password_hash, first_name, last_name) 
-       VALUES ($1, $2, $3, $4, $5) 
-       RETURNING id, username, email`,
-      ['demouser', 'demo@bankrollgod.com', hashedPassword, 'Demo', 'User']
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be at least 6 characters long'
+      });
+    }
+
+    const userResult = await pool.query(
+      'SELECT password_hash FROM users WHERE id = $1',
+      [userId]
     );
 
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    const isCurrentPasswordValid = await bcrypt.compare(currentPassword, userResult.rows[0].password_hash);
+    if (!isCurrentPasswordValid) {
+      return res.status(400).json({
+        success: false,
+        message: 'Current password is incorrect'
+      });
+    }
+
+    const hashedNewPassword = await bcrypt.hash(newPassword, 12);
+
     await pool.query(
-      `INSERT INTO bankrolls (user_id, name, initial_amount, current_amount) 
-       VALUES ($1, $2, $3, $4)`,
-      [demoUser.rows[0].id, 'Demo Bankroll', 1000, 1250]
+      'UPDATE users SET password_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+      [hashedNewPassword, userId]
     );
 
     res.json({
       success: true,
-      message: 'Demo user created successfully! Login with:',
-      credentials: {
-        email: 'demo@bankrollgod.com',
-        password: 'demo123'
-      }
+      message: 'Password changed successfully'
     });
 
   } catch (error) {
-    console.error('Create demo user error:', error);
+    console.error('Password change error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to create demo user: ' + error.message
+      message: 'Server error'
+    });
+  }
+});
+
+// PUT - Update privacy settings
+app.put('/api/users/privacy', authenticateToken, async (req, res) => {
+  try {
+    const { profilePublic, showStats, allowMessages, dataSharing } = req.body;
+    const userId = req.user.userId;
+
+    await pool.query(
+      `UPDATE users 
+       SET profile_public = $1, show_stats = $2, allow_messages = $3, data_sharing = $4, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $5`,
+      [Boolean(profilePublic), Boolean(showStats), Boolean(allowMessages), Boolean(dataSharing), userId]
+    );
+
+    res.json({
+      success: true,
+      message: 'Privacy settings updated successfully'
+    });
+
+  } catch (error) {
+    console.error('Privacy update error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// DELETE - Delete user account
+app.delete('/api/users/delete', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+
+    // Delete in correct order due to foreign key constraints
+    await pool.query('DELETE FROM games WHERE user_id = $1', [userId]);
+    await pool.query('DELETE FROM sessions WHERE user_id = $1', [userId]);
+    await pool.query('DELETE FROM bankrolls WHERE user_id = $1', [userId]);
+    await pool.query('DELETE FROM users WHERE id = $1', [userId]);
+
+    res.json({
+      success: true,
+      message: 'Account and all associated data deleted successfully'
+    });
+
+  } catch (error) {
+    console.error('Account deletion error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
     });
   }
 });
@@ -703,17 +828,22 @@ app.use('*', (req, res) => {
     message: 'Endpoint not found',
     path: req.originalUrl,
     available_endpoints: [
-      'GET /',
-      'GET /health',
-      'GET /api/health',
-      'POST /api/auth/login',
-      'POST /api/auth/register',
-      'GET /api/auth/me',
-      'POST /api/auth/logout',
-      'GET /api/create-demo-user',
-      'GET /setup-database',
-      'GET /api/bankrolls',
-      'GET /api/sessions/active'
+  'GET /',
+  'GET /health',
+  'GET /api/health',
+  'POST /api/auth/login',
+  'POST /api/auth/register',
+  'GET /api/auth/me',
+  'POST /api/auth/logout',
+  'GET /api/create-demo-user',
+  'GET /setup-database',
+  'GET /api/bankrolls',
+  'GET /api/sessions/active',
+  'GET /api/users/profile',
+  'PUT /api/users/profile',
+  'PUT /api/users/change-password',
+  'PUT /api/users/privacy',
+  'DELETE /api/users/delete'
     ]
   });
 });
