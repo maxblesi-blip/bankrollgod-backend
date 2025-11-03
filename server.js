@@ -53,7 +53,13 @@ const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 
+  console.log('🔧 JWT DEBUG - Auth header:', !!authHeader);
+  console.log('🔧 JWT DEBUG - Token exists:', !!token);
+  console.log('🔧 JWT DEBUG - Token preview:', token?.substring(0, 50));
+  console.log('🔧 JWT DEBUG - JWT_SECRET:', JWT_SECRET?.substring(0, 20));
+
   if (!token) {
+    console.log('🔧 JWT DEBUG - No token provided');
     return res.status(401).json({
       success: false,
       message: 'Access token required'
@@ -62,11 +68,14 @@ const authenticateToken = (req, res, next) => {
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) {
+      console.log('🔧 JWT DEBUG - Verification failed:', err.message);
+      console.log('🔧 JWT DEBUG - Error type:', err.name);
       return res.status(403).json({
         success: false,
         message: 'Invalid or expired token'
       });
     }
+    console.log('🔧 JWT DEBUG - Verification successful for user:', user.userId);
     req.user = user;
     next();
   });
