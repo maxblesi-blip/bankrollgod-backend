@@ -32,7 +32,7 @@ app.use(helmet({
 app.use(cors({
   origin: true,
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
@@ -243,8 +243,6 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-
-
 // =============================================================================
 // USER PROFILE ENDPOINTS
 // =============================================================================
@@ -299,7 +297,7 @@ app.post('/api/auth/logout', authenticateToken, (req, res) => {
 // PUT - Update user profile
 app.put('/api/users/profile', authenticateToken, async (req, res) => {
   try {
-    const { username, nickname, email, first_name, last_name } = req.body;
+    const { username, email, first_name, last_name, nickname } = req.body;
     const userId = req.user.userId;
 
     if (!username || !email) {
@@ -309,7 +307,6 @@ app.put('/api/users/profile', authenticateToken, async (req, res) => {
       });
     }
 
-    // Check if username/email already exists (exclude current user)
     const existingUser = await pool.query(
       'SELECT id FROM users WHERE (email = $1 OR username = $2) AND id != $3',
       [email, username, userId]
@@ -454,7 +451,6 @@ app.delete('/api/users/delete', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
 
-    // Delete in correct order due to foreign key constraints
     await pool.query('DELETE FROM games WHERE user_id = $1', [userId]);
     await pool.query('DELETE FROM sessions WHERE user_id = $1', [userId]);
     await pool.query('DELETE FROM bankrolls WHERE user_id = $1', [userId]);
@@ -478,7 +474,6 @@ app.delete('/api/users/delete', authenticateToken, async (req, res) => {
 // HEALTH CHECK ENDPOINTS
 // =============================================================================
 
-// Root
 app.get('/', (req, res) => {
   res.json({
     success: true,
@@ -492,7 +487,6 @@ app.get('/', (req, res) => {
   });
 });
 
-// Health Check
 app.get('/health', async (req, res) => {
   try {
     const client = await pool.connect();
@@ -543,7 +537,6 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// API Health Check
 app.get('/api/health', async (req, res) => {
   try {
     const client = await pool.connect();
@@ -571,10 +564,10 @@ app.get('/api/health', async (req, res) => {
 });
 
 // =============================================================================
-// PROTECTED API ENDPOINTS
+// BANKROLL ENDPOINTS
 // =============================================================================
 
-// Bankrolls (Protected)
+// GET ALL BANKROLLS
 app.get('/api/bankrolls', authenticateToken, async (req, res) => {
   try {
     const bankrollsResult = await pool.query(
@@ -591,7 +584,9 @@ app.get('/api/bankrolls', authenticateToken, async (req, res) => {
 
     res.json({ 
       success: true, 
-      data: bankrollsResult.rows 
+      data: {
+        bankrolls: bankrollsResult.rows
+      }
     });
 
   } catch (error) {
@@ -603,6 +598,7 @@ app.get('/api/bankrolls', authenticateToken, async (req, res) => {
   }
 });
 
+// GET SINGLE BANKROLL
 app.get('/api/bankrolls/:id', authenticateToken, async (req, res) => {
   try {
     const bankrollResult = await pool.query(
@@ -619,7 +615,9 @@ app.get('/api/bankrolls/:id', authenticateToken, async (req, res) => {
 
     res.json({ 
       success: true, 
-      data: bankrollResult.rows[0] 
+      data: {
+        bankroll: bankrollResult.rows[0]
+      }
     });
 
   } catch (error) {
@@ -631,21 +629,216 @@ app.get('/api/bankrolls/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Sessions (Protected)
+// ✅ CREATE BANKROLL
+app.post('/api/bankrolls', authenticateToken, async (req, res) => {
+  try {
+    const { name, type, starting_amount, current_amount, goal_amount, currency } = req.body;
+    const userId = req.user.userId;
+
+    if (!name || !type || !starting_amount) {
+      return res.status(400).json({
+        success: false,
+        error: 'Name, type und starting_amount sind erforderlich'
+      });
+    }
+
+    const newBankroll = await pool.query(
+      `INSERT INTO bankrolls 
+        (user_id, name, type, starting_amount, current_amount, goal_amount, currency, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       RETURNING *`,
+      [
+        userId,
+        name,
+        type,
+        parseFloat(starting_amount),
+        parseFloat(current_amount || starting_amount),
+        goal_amount ? parseFloat(goal_amount) : null,
+        currency || 'USD'
+      ]
+    );
+
+    console.log('✅ Bankroll created:', newBankroll.rows[0]);
+
+    res.status(201).json({
+      success: true,
+      data: {
+        bankroll: newBankroll.rows[0]
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error creating bankroll:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Fehler beim Erstellen der Bankroll'
+    });
+  }
+});
+
+// ✅ UPDATE BANKROLL
+app.put('/api/bankrolls/:id', authenticateToken, async (req, res) => {
+  try {
+    const bankrollId = req.params.id;
+    const userId = req.user.userId;
+    const { name, goal_amount, currency } = req.body;
+
+    const checkResult = await pool.query(
+      'SELECT * FROM bankrolls WHERE id = $1 AND user_id = $2',
+      [bankrollId, userId]
+    );
+
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Bankroll nicht gefunden'
+      });
+    }
+
+    const updateFields = [];
+    const values = [];
+    let paramCount = 1;
+
+    if (name) {
+      updateFields.push(`name = $${paramCount}`);
+      values.push(name);
+      paramCount++;
+    }
+
+    if (goal_amount !== undefined) {
+      updateFields.push(`goal_amount = $${paramCount}`);
+      values.push(goal_amount ? parseFloat(goal_amount) : null);
+      paramCount++;
+    }
+
+    if (currency) {
+      updateFields.push(`currency = $${paramCount}`);
+      values.push(currency);
+      paramCount++;
+    }
+
+    updateFields.push(`updated_at = CURRENT_TIMESTAMP`);
+    values.push(bankrollId, userId);
+
+    const updatedBankroll = await pool.query(
+      `UPDATE bankrolls 
+       SET ${updateFields.join(', ')}
+       WHERE id = $${paramCount} AND user_id = $${paramCount + 1}
+       RETURNING *`,
+      values
+    );
+
+    console.log('✅ Bankroll updated:', updatedBankroll.rows[0]);
+
+    res.json({
+      success: true,
+      data: {
+        bankroll: updatedBankroll.rows[0]
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error updating bankroll:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Fehler beim Aktualisieren der Bankroll'
+    });
+  }
+});
+
+// ✅ DELETE BANKROLL
+app.delete('/api/bankrolls/:id', authenticateToken, async (req, res) => {
+  try {
+    const bankrollId = req.params.id;
+    const userId = req.user.userId;
+
+    const checkResult = await pool.query(
+      'SELECT * FROM bankrolls WHERE id = $1 AND user_id = $2',
+      [bankrollId, userId]
+    );
+
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Bankroll nicht gefunden'
+      });
+    }
+
+    await pool.query(
+      'DELETE FROM bankrolls WHERE id = $1 AND user_id = $2',
+      [bankrollId, userId]
+    );
+
+    console.log('✅ Bankroll deleted:', bankrollId);
+
+    res.json({
+      success: true,
+      message: 'Bankroll und alle zugehörigen Daten gelöscht'
+    });
+
+  } catch (error) {
+    console.error('❌ Error deleting bankroll:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Fehler beim Löschen der Bankroll'
+    });
+  }
+});
+
+// GET BANKROLL SESSIONS
+app.get('/api/bankrolls/:id/sessions', authenticateToken, async (req, res) => {
+  try {
+    const sessionsResult = await pool.query(
+      `SELECT * FROM sessions 
+       WHERE bankroll_id = $1 
+       ORDER BY start_time DESC 
+       LIMIT $2`,
+      [req.params.id, req.query.limit || 10]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        sessions: sessionsResult.rows
+      }
+    });
+
+  } catch (error) {
+    console.error('Get bankroll sessions error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get sessions'
+    });
+  }
+});
+
+// =============================================================================
+// SESSION ENDPOINTS
+// =============================================================================
+
+// GET ACTIVE SESSIONS
 app.get('/api/sessions/active', authenticateToken, async (req, res) => {
   try {
     const sessionsResult = await pool.query(
-      `SELECT s.*, b.name as bankroll_name 
+      `SELECT s.*, 
+              b.name as bankroll_name,
+              b.id as bankroll_id,
+              b.currency as currency,
+              COUNT(g.id) as total_games
        FROM sessions s
        LEFT JOIN bankrolls b ON s.bankroll_id = b.id
-       WHERE s.user_id = $1 AND s.status = $2 
+       LEFT JOIN games g ON s.id = g.session_id
+       WHERE s.user_id = $1 AND s.status = 'running' 
+       GROUP BY s.id, b.id, b.name, b.currency
        ORDER BY s.start_time DESC`,
-      [req.user.userId, 'running']
+      [req.user.userId]
     );
 
     res.json({ 
       success: true, 
-      data: sessionsResult.rows 
+      data: {
+        sessions: sessionsResult.rows
+      }
     });
 
   } catch (error) {
@@ -657,20 +850,23 @@ app.get('/api/sessions/active', authenticateToken, async (req, res) => {
   }
 });
 
+// CREATE SESSION
 app.post('/api/sessions', authenticateToken, async (req, res) => {
   try {
-    const { bankroll_id, location, game_type, stakes, notes } = req.body;
+    const { name, bankroll_id, location, session_type, game_type, stakes, notes } = req.body;
 
     const newSession = await pool.query(
-      `INSERT INTO sessions (user_id, bankroll_id, location, game_type, stakes, notes) 
-       VALUES ($1, $2, $3, $4, $5, $6) 
+      `INSERT INTO sessions (user_id, name, bankroll_id, location, session_type, game_type, stakes, notes, status, start_time, created_at, updated_at) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'running', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) 
        RETURNING *`,
-      [req.user.userId, bankroll_id, location, game_type, stakes, notes]
+      [req.user.userId, name, bankroll_id, location, session_type, game_type, stakes, notes]
     );
 
     res.status(201).json({ 
       success: true, 
-      data: newSession.rows[0] 
+      data: {
+        session: newSession.rows[0]
+      }
     });
 
   } catch (error) {
@@ -682,10 +878,9 @@ app.post('/api/sessions', authenticateToken, async (req, res) => {
   }
 });
 
+// COMPLETE SESSION
 app.post('/api/sessions/:id/complete', authenticateToken, async (req, res) => {
   try {
-    const { finalData } = req.body;
-
     const session = await pool.query(
       'SELECT * FROM sessions WHERE id = $1 AND user_id = $2',
       [req.params.id, req.user.userId]
@@ -708,7 +903,9 @@ app.post('/api/sessions/:id/complete', authenticateToken, async (req, res) => {
 
     res.json({ 
       success: true, 
-      data: updatedSession.rows[0] 
+      data: {
+        session: updatedSession.rows[0]
+      }
     });
 
   } catch (error) {
@@ -720,6 +917,7 @@ app.post('/api/sessions/:id/complete', authenticateToken, async (req, res) => {
   }
 });
 
+// GET SESSION GAMES
 app.get('/api/sessions/:id/games', authenticateToken, async (req, res) => {
   try {
     const gamesResult = await pool.query(
@@ -732,7 +930,9 @@ app.get('/api/sessions/:id/games', authenticateToken, async (req, res) => {
 
     res.json({ 
       success: true, 
-      data: gamesResult.rows 
+      data: {
+        games: gamesResult.rows
+      }
     });
 
   } catch (error) {
@@ -745,7 +945,201 @@ app.get('/api/sessions/:id/games', authenticateToken, async (req, res) => {
 });
 
 // =============================================================================
-// DATABASE SETUP ENDPOINT
+// GAME ENDPOINTS
+// =============================================================================
+
+// CREATE GAME
+app.post('/api/games', authenticateToken, async (req, res) => {
+  try {
+    const { session_id, name, type, buy_in, entries } = req.body;
+
+    const newGame = await pool.query(
+      `INSERT INTO games 
+        (user_id, session_id, name, type, buy_in, entries, start_time, status, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, 'running', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       RETURNING *`,
+      [req.user.userId, session_id, name, type, parseFloat(buy_in), parseInt(entries) || 1]
+    );
+
+    res.status(201).json({
+      success: true,
+      data: {
+        game: newGame.rows[0]
+      }
+    });
+
+  } catch (error) {
+    console.error('Error creating game:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Fehler beim Erstellen des Games'
+    });
+  }
+});
+
+// ✅ COMPLETE GAME WITH WINNINGS
+app.post('/api/games/:id/complete', authenticateToken, async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    const gameId = req.params.id;
+    const userId = req.user.userId;
+    const { winnings, update_bankroll } = req.body;
+
+    await client.query('BEGIN');
+
+    const gameResult = await client.query(`
+      SELECT 
+        g.*,
+        s.id as session_id,
+        s.bankroll_id,
+        b.current_amount as bankroll_current_amount,
+        b.currency as bankroll_currency
+      FROM games g
+      JOIN sessions s ON g.session_id = s.id
+      JOIN bankrolls b ON s.bankroll_id = b.id
+      WHERE g.id = $1 AND g.user_id = $2
+    `, [gameId, userId]);
+
+    if (gameResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        success: false,
+        error: 'Game nicht gefunden'
+      });
+    }
+
+    const game = gameResult.rows[0];
+
+    const winningsAmount = parseFloat(winnings || 0);
+    const totalBuyIn = parseFloat(game.buy_in) * parseInt(game.entries);
+    const netProfit = winningsAmount - totalBuyIn;
+
+    console.log('💰 Game Completion:', {
+      gameId,
+      gameName: game.name,
+      buyIn: game.buy_in,
+      entries: game.entries,
+      totalBuyIn,
+      winnings: winningsAmount,
+      netProfit
+    });
+
+    const updatedGame = await client.query(`
+      UPDATE games 
+      SET 
+        status = 'completed',
+        winnings = $1,
+        net_profit = $2,
+        cash_out = $1,
+        profit_loss = $2,
+        end_time = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $3
+      RETURNING *
+    `, [winningsAmount, netProfit, gameId]);
+
+    let updatedBankroll = null;
+
+    if (update_bankroll === true) {
+      const newBankrollAmount = parseFloat(game.bankroll_current_amount) + netProfit;
+
+      const bankrollUpdate = await client.query(`
+        UPDATE bankrolls 
+        SET 
+          current_amount = $1,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = $2
+        RETURNING *
+      `, [newBankrollAmount, game.bankroll_id]);
+
+      updatedBankroll = bankrollUpdate.rows[0];
+
+      console.log('✅ Bankroll updated:', {
+        bankrollId: game.bankroll_id,
+        oldAmount: game.bankroll_current_amount,
+        netProfit,
+        newAmount: newBankrollAmount
+      });
+    }
+
+    await client.query('COMMIT');
+
+    console.log('✅ Game completed successfully');
+
+    const response = {
+      success: true,
+      data: {
+        game: updatedGame.rows[0]
+      }
+    };
+
+    if (updatedBankroll) {
+      response.data.bankroll = updatedBankroll;
+    }
+
+    res.json(response);
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('❌ Error completing game:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Fehler beim Beenden des Games'
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// UPDATE GAME ENTRIES
+app.patch('/api/games/:id/entries', authenticateToken, async (req, res) => {
+  try {
+    const gameId = req.params.id;
+    const userId = req.user.userId;
+    const { entries } = req.body;
+
+    if (!entries || entries < 1) {
+      return res.status(400).json({
+        success: false,
+        error: 'Entries muss mindestens 1 sein'
+      });
+    }
+
+    const updatedGame = await pool.query(`
+      UPDATE games 
+      SET entries = $1, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $2 AND user_id = $3
+      RETURNING *
+    `, [parseInt(entries), gameId, userId]);
+
+    if (updatedGame.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Game nicht gefunden'
+      });
+    }
+
+    console.log('✅ Game entries updated:', updatedGame.rows[0]);
+
+    res.json({
+      success: true,
+      data: {
+        game: updatedGame.rows[0]
+      }
+    });
+
+  } catch (error) {
+    console.error('Error updating entries:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Fehler beim Aktualisieren der Entries'
+    });
+  }
+});
+
+// =============================================================================
+// DATABASE SETUP & MIGRATION ENDPOINTS
 // =============================================================================
 
 app.get('/setup-database', async (req, res) => {
@@ -755,36 +1149,34 @@ app.get('/setup-database', async (req, res) => {
     await pool.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
     
     await pool.query(`
-  CREATE TABLE IF NOT EXISTS users (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    email VARCHAR(255) UNIQUE NOT NULL,
-    username VARCHAR(100) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
-    first_name VARCHAR(100),
-    last_name VARCHAR(100),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  )
-`);
+      CREATE TABLE IF NOT EXISTS users (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        email VARCHAR(255) UNIQUE NOT NULL,
+        username VARCHAR(100) UNIQUE NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        first_name VARCHAR(100),
+        last_name VARCHAR(100),
+        nickname VARCHAR(100),
+        profile_public BOOLEAN DEFAULT false,
+        show_stats BOOLEAN DEFAULT true,
+        allow_messages BOOLEAN DEFAULT true,
+        data_sharing BOOLEAN DEFAULT false,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
 
-// ADD THIS BLOCK HERE:
-await pool.query(`
-  ALTER TABLE users 
-  ADD COLUMN IF NOT EXISTS nickname VARCHAR(100),
-  ADD COLUMN IF NOT EXISTS profile_public BOOLEAN DEFAULT false,
-  ADD COLUMN IF NOT EXISTS show_stats BOOLEAN DEFAULT true,
-  ADD COLUMN IF NOT EXISTS allow_messages BOOLEAN DEFAULT true,
-  ADD COLUMN IF NOT EXISTS data_sharing BOOLEAN DEFAULT false
-`);
-
-await pool.query(`
-  CREATE TABLE IF NOT EXISTS bankrolls (
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bankrolls (
         id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         name VARCHAR(255) NOT NULL,
+        type VARCHAR(20) DEFAULT 'online',
         initial_amount DECIMAL(15,2) NOT NULL DEFAULT 0,
+        starting_amount DECIMAL(15,2) NOT NULL DEFAULT 0,
         current_amount DECIMAL(15,2) NOT NULL DEFAULT 0,
-        currency VARCHAR(3) DEFAULT 'EUR',
+        goal_amount DECIMAL(15,2),
+        currency VARCHAR(3) DEFAULT 'USD',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
@@ -795,7 +1187,9 @@ await pool.query(`
         id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         bankroll_id UUID REFERENCES bankrolls(id) ON DELETE SET NULL,
+        name VARCHAR(255),
         location VARCHAR(255),
+        session_type VARCHAR(100),
         game_type VARCHAR(100),
         stakes VARCHAR(100),
         start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -813,7 +1207,11 @@ await pool.query(`
         id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
+        name VARCHAR(255),
+        type VARCHAR(50),
         buy_in DECIMAL(15,2) NOT NULL DEFAULT 0,
+        winnings DECIMAL(15,2) DEFAULT 0,
+        net_profit DECIMAL(15,2) DEFAULT 0,
         cash_out DECIMAL(15,2) DEFAULT 0,
         profit_loss DECIMAL(15,2) DEFAULT 0,
         entries INTEGER DEFAULT 1,
@@ -830,11 +1228,10 @@ await pool.query(`
     console.log('✅ Database setup completed successfully!');
     
     res.json({
-  success: true,
-  message: 'Database setup completed with profile columns!',
-  tables_created: ['users', 'bankrolls', 'sessions', 'games'],
-  columns_added: ['nickname', 'profile_public', 'show_stats', 'allow_messages', 'data_sharing']
-});
+      success: true,
+      message: 'Database setup completed!',
+      tables_created: ['users', 'bankrolls', 'sessions', 'games']
+    });
     
   } catch (error) {
     console.error('❌ Database setup failed:', error);
@@ -846,38 +1243,127 @@ await pool.query(`
   }
 });
 
+// ✅ MIGRATION ENDPOINT
+app.post('/api/migrate', async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    console.log('🔧 Starting migration...');
+    const results = [];
+
+    await client.query('BEGIN');
+
+    try {
+      await client.query(`ALTER TABLE bankrolls ADD COLUMN IF NOT EXISTS type VARCHAR(20) DEFAULT 'online'`);
+      results.push('✅ Type column added/verified');
+    } catch (error) {
+      results.push('⚠️ Type column: ' + error.message);
+    }
+
+    try {
+      await client.query(`ALTER TABLE bankrolls ADD COLUMN IF NOT EXISTS currency VARCHAR(3) DEFAULT 'USD'`);
+      results.push('✅ Currency column added');
+    } catch (error) {
+      results.push('⚠️ Currency column: ' + error.message);
+    }
+
+    try {
+      await client.query(`ALTER TABLE bankrolls ADD COLUMN IF NOT EXISTS starting_amount DECIMAL(15,2) DEFAULT 0`);
+      results.push('✅ Starting_amount column added');
+    } catch (error) {
+      results.push('⚠️ Starting_amount column: ' + error.message);
+    }
+
+    try {
+      await client.query(`ALTER TABLE bankrolls ADD COLUMN IF NOT EXISTS goal_amount DECIMAL(15,2)`);
+      results.push('✅ Goal_amount column added');
+    } catch (error) {
+      results.push('⚠️ Goal_amount column: ' + error.message);
+    }
+
+    try {
+      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS name VARCHAR(255)`);
+      results.push('✅ Session name column added');
+    } catch (error) {
+      results.push('⚠️ Session name column: ' + error.message);
+    }
+
+    try {
+      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS session_type VARCHAR(100)`);
+      results.push('✅ Session type column added');
+    } catch (error) {
+      results.push('⚠️ Session type column: ' + error.message);
+    }
+
+    try {
+      await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS name VARCHAR(255)`);
+      results.push('✅ Game name column added');
+    } catch (error) {
+      results.push('⚠️ Game name column: ' + error.message);
+    }
+
+    try {
+      await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS type VARCHAR(50)`);
+      results.push('✅ Game type column added');
+    } catch (error) {
+      results.push('⚠️ Game type column: ' + error.message);
+    }
+
+    try {
+      await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS winnings DECIMAL(15,2) DEFAULT 0`);
+      results.push('✅ Winnings column added');
+    } catch (error) {
+      results.push('⚠️ Winnings column: ' + error.message);
+    }
+
+    try {
+      await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS net_profit DECIMAL(15,2) DEFAULT 0`);
+      results.push('✅ Net_profit column added');
+    } catch (error) {
+      results.push('⚠️ Net_profit column: ' + error.message);
+    }
+
+    await client.query(`UPDATE bankrolls SET starting_amount = initial_amount WHERE starting_amount = 0 OR starting_amount IS NULL`);
+    results.push('✅ Updated starting_amount from initial_amount');
+
+    await client.query(`UPDATE bankrolls SET currency = 'USD' WHERE currency IS NULL OR currency = ''`);
+    results.push('✅ Set default currency to USD');
+
+    await client.query('COMMIT');
+
+    console.log('✅ Migration completed!');
+
+    res.json({
+      success: true,
+      message: 'Migration completed successfully',
+      results: results
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('❌ Migration failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      hint: 'Check server logs for details'
+    });
+  } finally {
+    client.release();
+  }
+});
+
 // =============================================================================
 // ERROR HANDLERS
 // =============================================================================
 
-// 404 handler
 app.use('*', (req, res) => {
   res.status(404).json({
     success: false,
     message: 'Endpoint not found',
-    path: req.originalUrl,
-    available_endpoints: [
-  'GET /',
-  'GET /health',
-  'GET /api/health',
-  'POST /api/auth/login',
-  'POST /api/auth/register',
-  'GET /api/auth/me',
-  'POST /api/auth/logout',
-  'GET /api/create-demo-user',
-  'GET /setup-database',
-  'GET /api/bankrolls',
-  'GET /api/sessions/active',
-  'GET /api/users/profile',
-  'PUT /api/users/profile',
-  'PUT /api/users/change-password',
-  'PUT /api/users/privacy',
-  'DELETE /api/users/delete'
-    ]
+    path: req.originalUrl
   });
 });
 
-// Error handler
 app.use((error, req, res, next) => {
   console.error('Unhandled error:', error);
   res.status(500).json({
@@ -898,13 +1384,12 @@ app.listen(PORT, () => {
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'production'}`);
   console.log(`🗄️ Database: PostgreSQL (Ready)`);
   console.log(`🔐 Authentication: JWT (Ready)`);
-  console.log(`🔗 Health check: http://localhost:${PORT}/health`);
-  console.log(`⚙️  Setup database: http://localhost:${PORT}/setup-database`);
-  console.log(`👤 Create demo user: http://localhost:${PORT}/api/create-demo-user`);
+  console.log(`🔗 Health check: /health`);
+  console.log(`⚙️  Setup database: /setup-database`);
+  console.log(`🔄 Migration: POST /api/migrate`);
   console.log('🚀 ================================');
 });
 
-// Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('\n🛑 Shutting down server...');
   await pool.end();
