@@ -15,7 +15,7 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // JWT Secret
-const JWT_SECRET = process.env.JWT_SECRET || 'bankrollgod-jwt-secret-production-2024-secure';
+const JWT_SECRET = process.env.JWT_SECRET || 'bankrollgod-jwt-secret-change-in-production';
 
 // Database Connection
 const pool = new Pool({
@@ -194,6 +194,7 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
 
+    console.log('🔧 DEBUG - Creating token for user:', user.id, user);
     const token = jwt.sign(
       { 
         userId: user.id, 
