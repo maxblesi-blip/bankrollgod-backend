@@ -233,15 +233,17 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
+
+
 // =============================================================================
 // USER PROFILE ENDPOINTS
 // =============================================================================
 
-// GET - Get current user profile
-app.get('/api/users/profile', authenticateToken, async (req, res) => {
+// GET CURRENT USER
+app.get('/api/auth/me', authenticateToken, async (req, res) => {
   try {
     const userResult = await pool.query(
-      'SELECT id, username, email, first_name, last_name, nickname, profile_public, show_stats, allow_messages, data_sharing, created_at FROM users WHERE id = $1',
+      'SELECT id, username, email, first_name, last_name, created_at FROM users WHERE id = $1',
       [req.user.userId]
     );
 
@@ -253,29 +255,35 @@ app.get('/api/users/profile', authenticateToken, async (req, res) => {
     }
 
     const user = userResult.rows[0];
+
     res.json({
       success: true,
       user: {
         id: user.id,
         username: user.username,
         email: user.email,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        nickname: user.nickname,
-        profilePublic: user.profile_public,
-        showStats: user.show_stats,
-        allowMessages: user.allow_messages,
-        dataSharing: user.data_sharing,
+        firstName: user.first_name,
+        lastName: user.last_name,
         createdAt: user.created_at
       }
     });
+
   } catch (error) {
-    console.error('Get profile error:', error);
+    console.error('Get current user error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error'
+      message: 'Failed to get user data'
     });
   }
+});
+
+// LOGOUT
+app.post('/api/auth/logout', authenticateToken, (req, res) => {
+  console.log(`✅ User logged out: ${req.user.username}`);
+  res.json({
+    success: true,
+    message: 'Logout successful'
+  });
 });
 
 // PUT - Update user profile
