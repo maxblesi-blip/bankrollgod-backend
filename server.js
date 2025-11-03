@@ -746,20 +746,30 @@ app.get('/setup-database', async (req, res) => {
     await pool.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
     
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-        email VARCHAR(255) UNIQUE NOT NULL,
-        username VARCHAR(100) UNIQUE NOT NULL,
-        password_hash VARCHAR(255) NOT NULL,
-        first_name VARCHAR(100),
-        last_name VARCHAR(100),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-    
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS bankrolls (
+  CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    email VARCHAR(255) UNIQUE NOT NULL,
+    username VARCHAR(100) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    first_name VARCHAR(100),
+    last_name VARCHAR(100),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
+// ADD THIS BLOCK HERE:
+await pool.query(`
+  ALTER TABLE users 
+  ADD COLUMN IF NOT EXISTS nickname VARCHAR(100),
+  ADD COLUMN IF NOT EXISTS profile_public BOOLEAN DEFAULT false,
+  ADD COLUMN IF NOT EXISTS show_stats BOOLEAN DEFAULT true,
+  ADD COLUMN IF NOT EXISTS allow_messages BOOLEAN DEFAULT true,
+  ADD COLUMN IF NOT EXISTS data_sharing BOOLEAN DEFAULT false
+`);
+
+await pool.query(`
+  CREATE TABLE IF NOT EXISTS bankrolls (
         id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         name VARCHAR(255) NOT NULL,
@@ -811,10 +821,11 @@ app.get('/setup-database', async (req, res) => {
     console.log('✅ Database setup completed successfully!');
     
     res.json({
-      success: true,
-      message: 'Database setup completed successfully!',
-      tables_created: ['users', 'bankrolls', 'sessions', 'games']
-    });
+  success: true,
+  message: 'Database setup completed with profile columns!',
+  tables_created: ['users', 'bankrolls', 'sessions', 'games'],
+  columns_added: ['nickname', 'profile_public', 'show_stats', 'allow_messages', 'data_sharing']
+});
     
   } catch (error) {
     console.error('❌ Database setup failed:', error);
