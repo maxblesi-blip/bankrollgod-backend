@@ -7,6 +7,10 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
+console.log('🔍 DEBUG: DATABASE_URL exists:', !!process.env.DATABASE_URL);
+console.log('🔍 DEBUG: DATABASE_URL length:', process.env.DATABASE_URL?.length || 0);
+console.log('🔍 DEBUG: NODE_ENV:', process.env.NODE_ENV);
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 
@@ -16,7 +20,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'bankrollgod-jwt-secret-change-in-p
 // Database Connection
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: process.env.DATABASE_URL?.includes('render.com') ? { rejectUnauthorized: false } : false
 });
 
 // Security
