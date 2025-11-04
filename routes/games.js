@@ -374,58 +374,57 @@ router.put('/:id', [
   }
 });
 
-// POST /api/games/:id/complete - Complete game with REAL-TIME BANKROLL UPDATE
-router.post('/:id/complete', [
-  param('id').isUUID().withMessage('Invalid game ID'),
-  body('winnings')
-    .isFloat({ min: 0 })
-    .withMessage('Winnings must be a positive number'),
-  body('position_finished')
-    .optional()
-    .isInt({ min: 1 })
-    .withMessage('Position finished must be a positive integer'),
-  body('total_players')
-    .optional()
-    .isInt({ min: 1 })
-    .withMessage('Total players must be a positive integer')
-], handleValidationErrors, async (req, res) => {
+// POST /api/games/:id/complete - Complete game with BANKROLL UPDATE
+router.post('/:id/complete', async (req, res) => {
   try {
-    const game = await Game.findByPk(req.params.id);
-    
+    const { id } = req.params;
+    const { winnings = 0, position = null, total_players = null } = req.body;
+
+    // Find game
+    const game = await Game.findByPk(id);
     if (!game) {
       return res.status(404).json({
         success: false,
         message: 'Game not found'
       });
     }
+
+    // Update game
+    game.status = 'completed';
+    game.winnings = winnings;
+    game.cash_out = winnings;
+    game.net_profit = parseFloat(winnings) - (parseFloat(game.buy_in) * game.entries);
+    game.end_time = new Date();
     
-    if (game.status === 'completed') {
-      return res.status(400).json({
-        success: false,
-        message: 'Game is already completed'
-      });
+    if (position) game.position = position;
+    
+    await game.save();
+
+    // ⚡ REAL-TIME BANKROLL UPDATE - DAS FEHLT!
+    const session = await Session.findByPk(game.session_id, {
+      include: [{ model: Bankroll, as: 'bankroll' }]
+    });
+    
+    if (session && session.bankroll) {
+      await session.updateStatsFromGames();
+      await session.bankroll.updateStats();
+      await session.bankroll.reload();
     }
-    
-    const { winnings, position_finished, total_players } = req.body;
-    await game.completeGame(winnings, position_finished, total_players);
-    
-    // ⚡ REAL-TIME BANKROLL UPDATE
-    const updatedBankroll = await updateBankrollFromSession(game.session_id);
-    
+
+    // Response MIT Bankroll
     res.json({
       success: true,
-      message: 'Game completed successfully',
       data: {
         game,
-        bankroll: updatedBankroll
+        bankroll: session?.bankroll  // ⚡ DAS MUSS ZURÜCK!
       }
     });
+
   } catch (error) {
     console.error('Error completing game:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to complete game',
-      error: error.message
+      message: error.message
     });
   }
 });
@@ -482,7 +481,9 @@ router.put('/:id/entries', [
     .withMessage('Entries must be between 1 and 20')
 ], handleValidationErrors, async (req, res) => {
   try {
-    const game = await Game.findByPk(req.params.id);
+    const session = await Session.findByPk(game.session_id, {
+  include: [{ model: Bankroll, as: 'bankroll' }]
+});
     
     if (!game) {
       return res.status(404).json({
