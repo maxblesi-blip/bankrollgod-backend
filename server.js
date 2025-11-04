@@ -1029,7 +1029,7 @@ app.post('/api/games', authenticateToken, async (req, res) => {
   }
 });
 
-// COMPLETE GAME WITH WINNINGS - ⚡ WITH BANKROLL UPDATE
+// COMPLETE GAME WITH WINNINGS - ⚡ ONLY ADD WINNINGS (Buy-Ins already deducted!)
 app.post('/api/games/:id/complete', authenticateToken, async (req, res) => {
   const client = await pool.connect();
   
@@ -1065,7 +1065,7 @@ app.post('/api/games/:id/complete', authenticateToken, async (req, res) => {
 
     const winningsAmount = parseFloat(winnings || 0);
     const totalBuyIn = parseFloat(game.buy_in) * parseInt(game.entries);
-    const netProfit = winningsAmount - totalBuyIn;
+    const netProfit = winningsAmount - totalBuyIn;  // For display only
 
     console.log('💰 Game Completion:', {
       gameId,
@@ -1074,7 +1074,8 @@ app.post('/api/games/:id/complete', authenticateToken, async (req, res) => {
       entries: game.entries,
       totalBuyIn,
       winnings: winningsAmount,
-      netProfit
+      netProfitForDisplay: netProfit,
+      bankrollBefore: game.bankroll_current_amount
     });
 
     const updatedGame = await client.query(`
@@ -1091,8 +1092,8 @@ app.post('/api/games/:id/complete', authenticateToken, async (req, res) => {
       RETURNING *
     `, [winningsAmount, netProfit, gameId]);
 
-    // ⚡ BANKROLL UPDATE
-    const newBankrollAmount = parseFloat(game.bankroll_current_amount) + netProfit;
+    // ⚡ BANKROLL UPDATE - ONLY ADD WINNINGS (Buy-Ins already deducted at game start!)
+    const newBankrollAmount = parseFloat(game.bankroll_current_amount) + winningsAmount;
 
     const bankrollUpdate = await client.query(`
       UPDATE bankrolls 
@@ -1105,11 +1106,12 @@ app.post('/api/games/:id/complete', authenticateToken, async (req, res) => {
 
     const updatedBankroll = bankrollUpdate.rows[0];
 
-    console.log('✅ Bankroll updated:', {
+    console.log('✅ Bankroll updated (only winnings added):', {
       bankrollId: game.bankroll_id,
       oldAmount: game.bankroll_current_amount,
-      netProfit,
-      newAmount: newBankrollAmount
+      winningsAdded: winningsAmount,
+      newAmount: newBankrollAmount,
+      netProfitDisplay: netProfit
     });
 
     await client.query('COMMIT');
@@ -1121,7 +1123,7 @@ app.post('/api/games/:id/complete', authenticateToken, async (req, res) => {
       success: true,
       data: {
         game: updatedGame.rows[0],
-        bankroll: updatedBankroll  // ⚡ BANKROLL WIRD ZURÜCKGEGEBEN!
+        bankroll: updatedBankroll
       }
     });
 
