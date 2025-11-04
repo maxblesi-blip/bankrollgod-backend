@@ -7,7 +7,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
 require('./models');
-
+const gamesRouter = require('./routes/games');
 console.log('🔍 DEBUG: DATABASE_URL exists:', !!process.env.DATABASE_URL);
 console.log('🔍 DEBUG: DATABASE_URL length:', process.env.DATABASE_URL?.length || 0);
 console.log('🔍 DEBUG: NODE_ENV:', process.env.NODE_ENV);
@@ -81,7 +81,7 @@ const authenticateToken = (req, res, next) => {
     next();
   });
 };
-
+app.use('/api/games', authenticateToken, gamesRouter);
 // =============================================================================
 // AUTHENTICATION ENDPOINTS
 // =============================================================================
@@ -941,200 +941,6 @@ app.get('/api/sessions/:id/games', authenticateToken, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to get session games: ' + error.message
-    });
-  }
-});
-
-// =============================================================================
-// GAME ENDPOINTS
-// =============================================================================
-
-// CREATE GAME
-app.post('/api/games', authenticateToken, async (req, res) => {
-  try {
-    const { session_id, name, type, buy_in, entries } = req.body;
-
-    const newGame = await pool.query(
-      `INSERT INTO games 
-        (user_id, session_id, name, type, buy_in, entries, start_time, status, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, 'running', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-       RETURNING *`,
-      [req.user.userId, session_id, name, type, parseFloat(buy_in), parseInt(entries) || 1]
-    );
-
-    res.status(201).json({
-      success: true,
-      data: {
-        game: newGame.rows[0]
-      }
-    });
-
-  } catch (error) {
-    console.error('Error creating game:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Fehler beim Erstellen des Games'
-    });
-  }
-});
-
-// ✅ COMPLETE GAME WITH WINNINGS
-app.post('/api/games/:id/complete', authenticateToken, async (req, res) => {
-  const client = await pool.connect();
-  
-  try {
-    const gameId = req.params.id;
-    const userId = req.user.userId;
-    const { winnings, update_bankroll } = req.body;
-
-    await client.query('BEGIN');
-
-    const gameResult = await client.query(`
-      SELECT 
-        g.*,
-        s.id as session_id,
-        s.bankroll_id,
-        b.current_amount as bankroll_current_amount,
-        b.currency as bankroll_currency
-      FROM games g
-      JOIN sessions s ON g.session_id = s.id
-      JOIN bankrolls b ON s.bankroll_id = b.id
-      WHERE g.id = $1 AND g.user_id = $2
-    `, [gameId, userId]);
-
-    if (gameResult.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({
-        success: false,
-        error: 'Game nicht gefunden'
-      });
-    }
-
-    const game = gameResult.rows[0];
-
-    const winningsAmount = parseFloat(winnings || 0);
-    const totalBuyIn = parseFloat(game.buy_in) * parseInt(game.entries);
-    const netProfit = winningsAmount - totalBuyIn;
-
-    console.log('💰 Game Completion:', {
-      gameId,
-      gameName: game.name,
-      buyIn: game.buy_in,
-      entries: game.entries,
-      totalBuyIn,
-      winnings: winningsAmount,
-      netProfit
-    });
-
-    const updatedGame = await client.query(`
-      UPDATE games 
-      SET 
-        status = 'completed',
-        winnings = $1,
-        net_profit = $2,
-        cash_out = $1,
-        profit_loss = $2,
-        end_time = CURRENT_TIMESTAMP,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = $3
-      RETURNING *
-    `, [winningsAmount, netProfit, gameId]);
-
-    let updatedBankroll = null;
-
-    if (update_bankroll === true) {
-      const newBankrollAmount = parseFloat(game.bankroll_current_amount) + netProfit;
-
-      const bankrollUpdate = await client.query(`
-        UPDATE bankrolls 
-        SET 
-          current_amount = $1,
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = $2
-        RETURNING *
-      `, [newBankrollAmount, game.bankroll_id]);
-
-      updatedBankroll = bankrollUpdate.rows[0];
-
-      console.log('✅ Bankroll updated:', {
-        bankrollId: game.bankroll_id,
-        oldAmount: game.bankroll_current_amount,
-        netProfit,
-        newAmount: newBankrollAmount
-      });
-    }
-
-    await client.query('COMMIT');
-
-    console.log('✅ Game completed successfully');
-
-    const response = {
-      success: true,
-      data: {
-        game: updatedGame.rows[0]
-      }
-    };
-
-    if (updatedBankroll) {
-      response.data.bankroll = updatedBankroll;
-    }
-
-    res.json(response);
-
-  } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('❌ Error completing game:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Fehler beim Beenden des Games'
-    });
-  } finally {
-    client.release();
-  }
-});
-
-// UPDATE GAME ENTRIES
-app.patch('/api/games/:id/entries', authenticateToken, async (req, res) => {
-  try {
-    const gameId = req.params.id;
-    const userId = req.user.userId;
-    const { entries } = req.body;
-
-    if (!entries || entries < 1) {
-      return res.status(400).json({
-        success: false,
-        error: 'Entries muss mindestens 1 sein'
-      });
-    }
-
-    const updatedGame = await pool.query(`
-      UPDATE games 
-      SET entries = $1, updated_at = CURRENT_TIMESTAMP
-      WHERE id = $2 AND user_id = $3
-      RETURNING *
-    `, [parseInt(entries), gameId, userId]);
-
-    if (updatedGame.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'Game nicht gefunden'
-      });
-    }
-
-    console.log('✅ Game entries updated:', updatedGame.rows[0]);
-
-    res.json({
-      success: true,
-      data: {
-        game: updatedGame.rows[0]
-      }
-    });
-
-  } catch (error) {
-    console.error('Error updating entries:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Fehler beim Aktualisieren der Entries'
     });
   }
 });
