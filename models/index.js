@@ -1,17 +1,19 @@
 // models/index.js
+// Sequelize Model Associations & Exports
+
 const { sequelize } = require('../config/database');
 
-// Import models
+// Import all models
 const Bankroll = require('./Bankroll');
 const Session = require('./Session');
 const Game = require('./Game');
-const User = require('./User');
+const User = require('./User'); // Falls vorhanden
 
 // ============================================================================
 // ASSOCIATIONS
 // ============================================================================
 
-// Bankroll <-> Session
+// Bankroll <-> Session (One-to-Many)
 Bankroll.hasMany(Session, {
   foreignKey: 'bankroll_id',
   as: 'sessions',
@@ -22,7 +24,7 @@ Session.belongsTo(Bankroll, {
   as: 'bankroll'
 });
 
-// Session <-> Game
+// Session <-> Game (One-to-Many)
 Session.hasMany(Game, {
   foreignKey: 'session_id',
   as: 'games',
@@ -33,7 +35,7 @@ Game.belongsTo(Session, {
   as: 'session'
 });
 
-// User associations
+// User <-> Bankroll (One-to-Many)
 User.hasMany(Bankroll, {
   foreignKey: 'user_id',
   as: 'bankrolls',
@@ -44,6 +46,7 @@ Bankroll.belongsTo(User, {
   as: 'user'
 });
 
+// User <-> Session (One-to-Many)
 User.hasMany(Session, {
   foreignKey: 'user_id',
   as: 'sessions',
@@ -54,6 +57,7 @@ Session.belongsTo(User, {
   as: 'user'
 });
 
+// User <-> Game (One-to-Many)
 User.hasMany(Game, {
   foreignKey: 'user_id',
   as: 'games',
@@ -63,8 +67,6 @@ Game.belongsTo(User, {
   foreignKey: 'user_id',
   as: 'user'
 });
-
-console.log('✅ Model associations loaded');
 
 // ============================================================================
 // EXPORTS
