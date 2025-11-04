@@ -816,69 +816,7 @@ app.get('/api/bankrolls/:id/sessions', authenticateToken, async (req, res) => {
 // SESSION ENDPOINTS
 // =============================================================================
 
-// GET ACTIVE SESSIONS
-app.get('/api/sessions/active', authenticateToken, async (req, res) => {
-  try {
-    const sessionsResult = await pool.query(
-      `SELECT s.*, 
-              b.name as bankroll_name,
-              b.id as bankroll_id,
-              b.currency as currency,
-              COUNT(g.id) as total_games
-       FROM sessions s
-       LEFT JOIN bankrolls b ON s.bankroll_id = b.id
-       LEFT JOIN games g ON s.id = g.session_id
-       WHERE s.user_id = $1 AND s.status = 'running' 
-       GROUP BY s.id, b.id, b.name, b.currency
-       ORDER BY s.start_time DESC`,
-      [req.user.userId]
-    );
-
-    res.json({ 
-      success: true, 
-      data: {
-        sessions: sessionsResult.rows
-      }
-    });
-
-  } catch (error) {
-    console.error('Get active sessions error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to get active sessions: ' + error.message
-    });
-  }
-});
-
-// CREATE SESSION
-app.post('/api/sessions', authenticateToken, async (req, res) => {
-  try {
-    const { name, bankroll_id, location, session_type, game_type, stakes, notes } = req.body;
-
-    const newSession = await pool.query(
-      `INSERT INTO sessions (user_id, name, bankroll_id, location, session_type, game_type, stakes, notes, status, start_time, created_at, updated_at) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'running', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) 
-       RETURNING *`,
-      [req.user.userId, name, bankroll_id, location, session_type, game_type, stakes, notes]
-    );
-
-    res.status(201).json({ 
-      success: true, 
-      data: {
-        session: newSession.rows[0]
-      }
-    });
-
-  } catch (error) {
-    console.error('Create session error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to create session: ' + error.message
-    });
-  }
-});
-
-// COMPLETE SESSION
+// COMPLETE SESSION - WITH STATISTICS CALCULATION ⚡
 app.post('/api/sessions/:id/complete', authenticateToken, async (req, res) => {
   try {
     const session = await pool.query(
@@ -893,13 +831,55 @@ app.post('/api/sessions/:id/complete', authenticateToken, async (req, res) => {
       });
     }
 
+    // ⚡ 1. Get all games for this session
+    const gamesResult = await pool.query(
+      `SELECT 
+        COUNT(*) as total_games,
+        COALESCE(SUM(buy_in * entries), 0) as total_invested,
+        COALESCE(SUM(winnings), 0) as total_winnings
+       FROM games 
+       WHERE session_id = $1`,
+      [req.params.id]
+    );
+
+    const stats = gamesResult.rows[0];
+    const totalResult = parseFloat(stats.total_winnings) - parseFloat(stats.total_invested);
+    const totalGames = parseInt(stats.total_games);
+
+    // ⚡ 2. Calculate duration in minutes
+    const startTime = new Date(session.rows[0].start_time);
+    const endTime = new Date();
+    const durationMinutes = Math.round((endTime - startTime) / 60000); // ms to minutes
+
+    // ⚡ 3. Update session with all statistics
     const updatedSession = await pool.query(
       `UPDATE sessions 
-       SET status = 'completed', end_time = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $1 AND user_id = $2
+       SET status = 'completed', 
+           end_time = CURRENT_TIMESTAMP,
+           duration_minutes = $1,
+           total_games = $2,
+           total_result = $3,
+           total_invested = $4,
+           total_winnings = $5,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $6 AND user_id = $7
        RETURNING *`,
-      [req.params.id, req.user.userId]
+      [
+        durationMinutes,
+        totalGames,
+        totalResult,
+        stats.total_invested,
+        stats.total_winnings,
+        req.params.id,
+        req.user.userId
+      ]
     );
+
+    console.log(`✅ Session completed with stats:`, {
+      duration: durationMinutes,
+      games: totalGames,
+      result: totalResult
+    });
 
     res.json({ 
       success: true, 
@@ -913,33 +893,6 @@ app.post('/api/sessions/:id/complete', authenticateToken, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to complete session: ' + error.message
-    });
-  }
-});
-
-// GET SESSION GAMES
-app.get('/api/sessions/:id/games', authenticateToken, async (req, res) => {
-  try {
-    const gamesResult = await pool.query(
-      `SELECT g.* FROM games g
-       JOIN sessions s ON g.session_id = s.id
-       WHERE s.id = $1 AND s.user_id = $2
-       ORDER BY g.start_time DESC`,
-      [req.params.id, req.user.userId]
-    );
-
-    res.json({ 
-      success: true, 
-      data: {
-        games: gamesResult.rows
-      }
-    });
-
-  } catch (error) {
-    console.error('Get session games error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to get session games: ' + error.message
     });
   }
 });
