@@ -815,7 +815,127 @@ app.get('/api/bankrolls/:id/sessions', authenticateToken, async (req, res) => {
 // =============================================================================
 // SESSION ENDPOINTS
 // =============================================================================
+// CREATE NEW SESSION
+app.post('/api/sessions', authenticateToken, async (req, res) => {
+  try {
+    console.log('🎯 Creating new session for user:', req.user.userId);
+    console.log('🎯 Session data received:', req.body);
 
+    const { 
+      bankroll_id, 
+      name, 
+      location, 
+      session_type, 
+      game_type, 
+      stakes,
+      notes 
+    } = req.body;
+
+    // Validate required fields
+    if (!bankroll_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Bankroll ID is required'
+      });
+    }
+
+    // Verify bankroll belongs to user
+    const bankrollCheck = await pool.query(
+      'SELECT id FROM bankrolls WHERE id = $1 AND user_id = $2',
+      [bankroll_id, req.user.userId]
+    );
+
+    if (bankrollCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Bankroll not found or access denied'
+      });
+    }
+
+    // Check for existing active sessions for this bankroll
+    const activeSessionCheck = await pool.query(
+      'SELECT id FROM sessions WHERE bankroll_id = $1 AND status = $2',
+      [bankroll_id, 'running']
+    );
+
+    if (activeSessionCheck.rows.length > 0) {
+      return res.status(409).json({
+        success: false,
+        error: 'There is already an active session for this bankroll'
+      });
+    }
+
+    // Create the session
+    const newSession = await pool.query(
+      `INSERT INTO sessions (
+        user_id, bankroll_id, name, location, session_type, 
+        game_type, stakes, notes, status, start_time
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP) 
+      RETURNING *`,
+      [
+        req.user.userId,
+        bankroll_id,
+        name || 'Untitled Session',
+        location || '',
+        session_type || 'Cash Game',
+        game_type || '',
+        stakes || '',
+        notes || '',
+        'running'
+      ]
+    );
+
+    const session = newSession.rows[0];
+
+    console.log('✅ Session created successfully:', session.id);
+
+    res.status(201).json({
+      success: true,
+      data: {
+        session: session
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Session creation error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to create session: ' + error.message
+    });
+  }
+});
+
+// GET ACTIVE SESSIONS
+app.get('/api/sessions/active', authenticateToken, async (req, res) => {
+  try {
+    console.log('🔍 Getting active sessions for user:', req.user.userId);
+
+    const activeSessions = await pool.query(
+      `SELECT s.*, b.name as bankroll_name, b.current_amount as bankroll_amount
+       FROM sessions s 
+       LEFT JOIN bankrolls b ON s.bankroll_id = b.id
+       WHERE s.user_id = $1 AND s.status = $2
+       ORDER BY s.start_time DESC`,
+      [req.user.userId, 'running']
+    );
+
+    console.log('✅ Found active sessions:', activeSessions.rows.length);
+
+    res.json({
+      success: true,
+      data: {
+        sessions: activeSessions.rows
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching active sessions:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch active sessions: ' + error.message
+    });
+  }
+});
 // COMPLETE SESSION - WITH STATISTICS CALCULATION ⚡
 app.post('/api/sessions/:id/complete', authenticateToken, async (req, res) => {
   try {
