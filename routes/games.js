@@ -16,6 +16,33 @@ const handleValidationErrors = (req, res, next) => {
   next();
 };
 
+// Helper function to update bankroll in real-time
+async function updateBankrollFromSession(sessionId) {
+  try {
+    const session = await Session.findByPk(sessionId, {
+      include: [{ model: Bankroll, as: 'bankroll' }]
+    });
+    
+    if (!session || !session.bankroll) {
+      return null;
+    }
+
+    // Update session stats first
+    await session.updateStatsFromGames();
+    
+    // Then update bankroll stats
+    await session.bankroll.updateStats();
+    
+    // Reload to get fresh data
+    await session.bankroll.reload();
+    
+    return session.bankroll;
+  } catch (error) {
+    console.error('Error updating bankroll:', error);
+    throw error;
+  }
+}
+
 // GET /api/games - Get all games
 router.get('/', async (req, res) => {
   try {
@@ -177,7 +204,7 @@ router.get('/:id', [
   }
 });
 
-// POST /api/games - Create new game
+// POST /api/games - Create new game with REAL-TIME BANKROLL UPDATE
 router.post('/', [
   body('session_id')
     .isUUID()
@@ -236,13 +263,24 @@ router.post('/', [
     
     const game = await Game.create(req.body);
     
-    // Update session stats
-    await session.updateStatsFromGames();
+    // ⚡ REAL-TIME BANKROLL UPDATE
+    const updatedBankroll = await updateBankrollFromSession(req.body.session_id);
+    
+    // Reload session for fresh stats
+    await session.reload();
     
     res.status(201).json({
       success: true,
       message: 'Game created successfully',
-      data: game
+      data: {
+        game,
+        bankroll: updatedBankroll,
+        sessionStats: {
+          total_buy_in: session.total_buy_in,
+          total_winnings: session.total_winnings,
+          total_result: session.total_result
+        }
+      }
     });
   } catch (error) {
     console.error('Error creating game:', error);
@@ -254,7 +292,7 @@ router.post('/', [
   }
 });
 
-// PUT /api/games/:id - Update game
+// PUT /api/games/:id - Update game with REAL-TIME BANKROLL UPDATE
 router.put('/:id', [
   param('id').isUUID().withMessage('Invalid game ID'),
   body('name')
@@ -315,16 +353,16 @@ router.put('/:id', [
     
     await game.update(req.body);
     
-    // Update session stats
-    const session = await game.getSession();
-    if (session) {
-      await session.updateStatsFromGames();
-    }
+    // ⚡ REAL-TIME BANKROLL UPDATE
+    const updatedBankroll = await updateBankrollFromSession(game.session_id);
     
     res.json({
       success: true,
       message: 'Game updated successfully',
-      data: game
+      data: {
+        game,
+        bankroll: updatedBankroll
+      }
     });
   } catch (error) {
     console.error('Error updating game:', error);
@@ -336,7 +374,7 @@ router.put('/:id', [
   }
 });
 
-// POST /api/games/:id/complete - Complete game
+// POST /api/games/:id/complete - Complete game with REAL-TIME BANKROLL UPDATE
 router.post('/:id/complete', [
   param('id').isUUID().withMessage('Invalid game ID'),
   body('winnings')
@@ -371,10 +409,16 @@ router.post('/:id/complete', [
     const { winnings, position_finished, total_players } = req.body;
     await game.completeGame(winnings, position_finished, total_players);
     
+    // ⚡ REAL-TIME BANKROLL UPDATE
+    const updatedBankroll = await updateBankrollFromSession(game.session_id);
+    
     res.json({
       success: true,
       message: 'Game completed successfully',
-      data: game
+      data: {
+        game,
+        bankroll: updatedBankroll
+      }
     });
   } catch (error) {
     console.error('Error completing game:', error);
@@ -386,7 +430,7 @@ router.post('/:id/complete', [
   }
 });
 
-// POST /api/games/:id/bust - Mark game as busted
+// POST /api/games/:id/bust - Mark game as busted with REAL-TIME BANKROLL UPDATE
 router.post('/:id/bust', [
   param('id').isUUID().withMessage('Invalid game ID')
 ], handleValidationErrors, async (req, res) => {
@@ -409,10 +453,16 @@ router.post('/:id/bust', [
     
     await game.bustOut();
     
+    // ⚡ REAL-TIME BANKROLL UPDATE
+    const updatedBankroll = await updateBankrollFromSession(game.session_id);
+    
     res.json({
       success: true,
       message: 'Game marked as busted',
-      data: game
+      data: {
+        game,
+        bankroll: updatedBankroll
+      }
     });
   } catch (error) {
     console.error('Error busting game:', error);
@@ -424,7 +474,7 @@ router.post('/:id/bust', [
   }
 });
 
-// PUT /api/games/:id/entries - Update game entries
+// PUT /api/games/:id/entries - Update game entries with REAL-TIME BANKROLL UPDATE
 router.put('/:id/entries', [
   param('id').isUUID().withMessage('Invalid game ID'),
   body('entries')
@@ -443,10 +493,16 @@ router.put('/:id/entries', [
     
     await game.updateEntries(req.body.entries);
     
+    // ⚡ REAL-TIME BANKROLL UPDATE
+    const updatedBankroll = await updateBankrollFromSession(game.session_id);
+    
     res.json({
       success: true,
       message: 'Game entries updated successfully',
-      data: game
+      data: {
+        game,
+        bankroll: updatedBankroll
+      }
     });
   } catch (error) {
     console.error('Error updating game entries:', error);
@@ -458,7 +514,7 @@ router.put('/:id/entries', [
   }
 });
 
-// DELETE /api/games/:id - Delete game
+// DELETE /api/games/:id - Delete game with REAL-TIME BANKROLL UPDATE
 router.delete('/:id', [
   param('id').isUUID().withMessage('Invalid game ID')
 ], handleValidationErrors, async (req, res) => {
@@ -472,17 +528,18 @@ router.delete('/:id', [
       });
     }
     
-    const session = await game.getSession();
+    const sessionId = game.session_id;
     await game.destroy();
     
-    // Update session stats after deletion
-    if (session) {
-      await session.updateStatsFromGames();
-    }
+    // ⚡ REAL-TIME BANKROLL UPDATE
+    const updatedBankroll = await updateBankrollFromSession(sessionId);
     
     res.json({
       success: true,
-      message: 'Game deleted successfully'
+      message: 'Game deleted successfully',
+      data: {
+        bankroll: updatedBankroll
+      }
     });
   } catch (error) {
     console.error('Error deleting game:', error);
