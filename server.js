@@ -6,7 +6,6 @@ const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
-require('./models');
 
 console.log('🔍 DEBUG: DATABASE_URL exists:', !!process.env.DATABASE_URL);
 console.log('🔍 DEBUG: DATABASE_URL length:', process.env.DATABASE_URL?.length || 0);
@@ -630,7 +629,7 @@ app.get('/api/bankrolls/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// ✅ CREATE BANKROLL
+// CREATE BANKROLL
 app.post('/api/bankrolls', authenticateToken, async (req, res) => {
   try {
     const { name, type, starting_amount, current_amount, goal_amount, currency } = req.body;
@@ -677,7 +676,7 @@ app.post('/api/bankrolls', authenticateToken, async (req, res) => {
   }
 });
 
-// ✅ UPDATE BANKROLL
+// UPDATE BANKROLL
 app.put('/api/bankrolls/:id', authenticateToken, async (req, res) => {
   try {
     const bankrollId = req.params.id;
@@ -747,7 +746,7 @@ app.put('/api/bankrolls/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// ✅ DELETE BANKROLL
+// DELETE BANKROLL
 app.delete('/api/bankrolls/:id', authenticateToken, async (req, res) => {
   try {
     const bankrollId = req.params.id;
@@ -978,14 +977,14 @@ app.post('/api/games', authenticateToken, async (req, res) => {
   }
 });
 
-// ✅ COMPLETE GAME WITH WINNINGS
+// COMPLETE GAME WITH WINNINGS - ⚡ WITH BANKROLL UPDATE
 app.post('/api/games/:id/complete', authenticateToken, async (req, res) => {
   const client = await pool.connect();
   
   try {
     const gameId = req.params.id;
     const userId = req.user.userId;
-    const { winnings, update_bankroll } = req.body;
+    const { winnings } = req.body;
 
     await client.query('BEGIN');
 
@@ -1040,46 +1039,39 @@ app.post('/api/games/:id/complete', authenticateToken, async (req, res) => {
       RETURNING *
     `, [winningsAmount, netProfit, gameId]);
 
-    let updatedBankroll = null;
+    // ⚡ BANKROLL UPDATE
+    const newBankrollAmount = parseFloat(game.bankroll_current_amount) + netProfit;
 
-    if (update_bankroll === true) {
-      const newBankrollAmount = parseFloat(game.bankroll_current_amount) + netProfit;
+    const bankrollUpdate = await client.query(`
+      UPDATE bankrolls 
+      SET 
+        current_amount = $1,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $2
+      RETURNING *
+    `, [newBankrollAmount, game.bankroll_id]);
 
-      const bankrollUpdate = await client.query(`
-        UPDATE bankrolls 
-        SET 
-          current_amount = $1,
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = $2
-        RETURNING *
-      `, [newBankrollAmount, game.bankroll_id]);
+    const updatedBankroll = bankrollUpdate.rows[0];
 
-      updatedBankroll = bankrollUpdate.rows[0];
-
-      console.log('✅ Bankroll updated:', {
-        bankrollId: game.bankroll_id,
-        oldAmount: game.bankroll_current_amount,
-        netProfit,
-        newAmount: newBankrollAmount
-      });
-    }
+    console.log('✅ Bankroll updated:', {
+      bankrollId: game.bankroll_id,
+      oldAmount: game.bankroll_current_amount,
+      netProfit,
+      newAmount: newBankrollAmount
+    });
 
     await client.query('COMMIT');
 
     console.log('✅ Game completed successfully');
 
-    const response = {
+    // ⚡ RETURN BOTH GAME AND BANKROLL
+    res.json({
       success: true,
       data: {
-        game: updatedGame.rows[0]
+        game: updatedGame.rows[0],
+        bankroll: updatedBankroll  // ⚡ BANKROLL WIRD ZURÜCKGEGEBEN!
       }
-    };
-
-    if (updatedBankroll) {
-      response.data.bankroll = updatedBankroll;
-    }
-
-    res.json(response);
+    });
 
   } catch (error) {
     await client.query('ROLLBACK');
@@ -1244,7 +1236,7 @@ app.get('/setup-database', async (req, res) => {
   }
 });
 
-// ✅ MIGRATION ENDPOINT
+// MIGRATION ENDPOINT
 app.post('/api/migrate', async (req, res) => {
   const client = await pool.connect();
   
