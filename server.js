@@ -948,12 +948,38 @@ app.get('/api/sessions/:id/games', authenticateToken, async (req, res) => {
 // GAME ENDPOINTS
 // =============================================================================
 
-// CREATE GAME
+// CREATE GAME - WITH BANKROLL DEDUCTION
 app.post('/api/games', authenticateToken, async (req, res) => {
+  const client = await pool.connect();
+  
   try {
     const { session_id, name, type, buy_in, entries } = req.body;
 
-    const newGame = await pool.query(
+    await client.query('BEGIN');
+
+    // Get session with bankroll info
+    const sessionResult = await client.query(`
+      SELECT 
+        s.id as session_id,
+        s.bankroll_id,
+        b.current_amount as bankroll_current_amount
+      FROM sessions s
+      JOIN bankrolls b ON s.bankroll_id = b.id
+      WHERE s.id = $1
+    `, [session_id]);
+
+    if (sessionResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        success: false,
+        error: 'Session nicht gefunden'
+      });
+    }
+
+    const session = sessionResult.rows[0];
+    
+    // Create game
+    const newGame = await client.query(
       `INSERT INTO games 
         (user_id, session_id, name, type, buy_in, entries, start_time, status, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, 'running', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -961,19 +987,45 @@ app.post('/api/games', authenticateToken, async (req, res) => {
       [req.user.userId, session_id, name, type, parseFloat(buy_in), parseInt(entries) || 1]
     );
 
+    // ⚡ DEDUCT BUY-IN FROM BANKROLL
+    const totalBuyIn = parseFloat(buy_in) * parseInt(entries);
+    const newBankrollAmount = parseFloat(session.bankroll_current_amount) - totalBuyIn;
+
+    const bankrollUpdate = await client.query(`
+      UPDATE bankrolls 
+      SET 
+        current_amount = $1,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $2
+      RETURNING *
+    `, [newBankrollAmount, session.bankroll_id]);
+
+    await client.query('COMMIT');
+
+    console.log('✅ Game created, bankroll deducted:', {
+      gameId: newGame.rows[0].id,
+      buyIn: totalBuyIn,
+      oldAmount: session.bankroll_current_amount,
+      newAmount: newBankrollAmount
+    });
+
     res.status(201).json({
       success: true,
       data: {
-        game: newGame.rows[0]
+        game: newGame.rows[0],
+        bankroll: bankrollUpdate.rows[0]  // ⚡ Return updated bankroll
       }
     });
 
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Error creating game:', error);
     res.status(500).json({
       success: false,
       error: 'Fehler beim Erstellen des Games'
     });
+  } finally {
+    client.release();
   }
 });
 
@@ -1085,8 +1137,10 @@ app.post('/api/games/:id/complete', authenticateToken, async (req, res) => {
   }
 });
 
-// UPDATE GAME ENTRIES
+// UPDATE GAME ENTRIES - WITH BANKROLL ADJUSTMENT
 app.patch('/api/games/:id/entries', authenticateToken, async (req, res) => {
+  const client = await pool.connect();
+  
   try {
     const gameId = req.params.id;
     const userId = req.user.userId;
@@ -1099,35 +1153,82 @@ app.patch('/api/games/:id/entries', authenticateToken, async (req, res) => {
       });
     }
 
-    const updatedGame = await pool.query(`
-      UPDATE games 
-      SET entries = $1, updated_at = CURRENT_TIMESTAMP
-      WHERE id = $2 AND user_id = $3
-      RETURNING *
-    `, [parseInt(entries), gameId, userId]);
+    await client.query('BEGIN');
 
-    if (updatedGame.rows.length === 0) {
+    // Get current game with bankroll info
+    const gameResult = await client.query(`
+      SELECT 
+        g.*,
+        s.bankroll_id,
+        b.current_amount as bankroll_current_amount
+      FROM games g
+      JOIN sessions s ON g.session_id = s.id
+      JOIN bankrolls b ON s.bankroll_id = b.id
+      WHERE g.id = $1 AND g.user_id = $2
+    `, [gameId, userId]);
+
+    if (gameResult.rows.length === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({
         success: false,
         error: 'Game nicht gefunden'
       });
     }
 
-    console.log('✅ Game entries updated:', updatedGame.rows[0]);
+    const game = gameResult.rows[0];
+    const oldEntries = parseInt(game.entries);
+    const newEntries = parseInt(entries);
+    const entriesDiff = newEntries - oldEntries;
+
+    // Update game entries
+    const updatedGame = await client.query(`
+      UPDATE games 
+      SET entries = $1, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $2 AND user_id = $3
+      RETURNING *
+    `, [newEntries, gameId, userId]);
+
+    // ⚡ ADJUST BANKROLL (add or subtract buy-in difference)
+    const buyInDiff = parseFloat(game.buy_in) * entriesDiff;
+    const newBankrollAmount = parseFloat(game.bankroll_current_amount) - buyInDiff;
+
+    const bankrollUpdate = await client.query(`
+      UPDATE bankrolls 
+      SET 
+        current_amount = $1,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $2
+      RETURNING *
+    `, [newBankrollAmount, game.bankroll_id]);
+
+    await client.query('COMMIT');
+
+    console.log('✅ Game entries updated, bankroll adjusted:', {
+      gameId,
+      oldEntries,
+      newEntries,
+      entriesDiff,
+      buyInDiff,
+      newAmount: newBankrollAmount
+    });
 
     res.json({
       success: true,
       data: {
-        game: updatedGame.rows[0]
+        game: updatedGame.rows[0],
+        bankroll: bankrollUpdate.rows[0]  // ⚡ Return updated bankroll
       }
     });
 
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Error updating entries:', error);
     res.status(500).json({
       success: false,
       error: 'Fehler beim Aktualisieren der Entries'
     });
+  } finally {
+    client.release();
   }
 });
 
