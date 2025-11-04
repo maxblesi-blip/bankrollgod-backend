@@ -380,7 +380,6 @@ router.post('/:id/complete', async (req, res) => {
     const { id } = req.params;
     const { winnings = 0, position = null, total_players = null } = req.body;
 
-    // Find game
     const game = await Game.findByPk(id);
     if (!game) {
       return res.status(404).json({
@@ -389,39 +388,45 @@ router.post('/:id/complete', async (req, res) => {
       });
     }
 
-    // Update game
     game.status = 'completed';
     game.winnings = winnings;
     game.cash_out = winnings;
     game.net_profit = parseFloat(winnings) - (parseFloat(game.buy_in) * game.entries);
     game.end_time = new Date();
-    
     if (position) game.position = position;
-    
     await game.save();
 
-    // ⚡ REAL-TIME BANKROLL UPDATE - DAS FEHLT!
+    // ⚡ HIER DEBUG LOGGING HINZUFÜGEN:
+    console.log('🔧 DEBUG - Finding session:', game.session_id);
+    
     const session = await Session.findByPk(game.session_id, {
       include: [{ model: Bankroll, as: 'bankroll' }]
     });
     
+    console.log('🔧 DEBUG - Session found:', !!session);
+    console.log('🔧 DEBUG - Session.bankroll:', !!session?.bankroll);
+    console.log('🔧 DEBUG - Session.bankroll_id:', session?.bankroll_id);
+    
     if (session && session.bankroll) {
+      console.log('🔧 DEBUG - Updating bankroll stats...');
       await session.updateStatsFromGames();
       await session.bankroll.updateStats();
       await session.bankroll.reload();
+      console.log('🔧 DEBUG - Bankroll updated!');
+    } else {
+      console.error('❌ DEBUG - Session or Bankroll is null!');
     }
 
-    // Response MIT Bankroll
     res.json({
       success: true,
       data: {
         game,
-        bankroll: session?.bankroll  // ⚡ DAS MUSS ZURÜCK!
+        bankroll: session?.bankroll
       }
     });
 
   } catch (error) {
-    console.error('Error completing game:', error);
+    console.error('❌ Error completing game:', error);
     res.status(500).json({
       success: false,
       message: error.message
