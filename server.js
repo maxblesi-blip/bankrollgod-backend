@@ -1412,16 +1412,19 @@ app.get('/setup-database', async (req, res) => {
   }
 });
 
-// MIGRATION ENDPOINT
+// 🎯 ERWEITERTE MIGRATION - Füge zu deinem /api/migrate Endpoint hinzu
+
+// POST /api/migrate - In deiner server.js
 app.post('/api/migrate', async (req, res) => {
   const client = await pool.connect();
   
   try {
-    console.log('🔧 Starting migration...');
+    console.log('🔧 Starting enhanced migration...');
     const results = [];
 
     await client.query('BEGIN');
 
+    // ⚡ EXISTING MIGRATIONS (deine bisherigen)
     try {
       await client.query(`ALTER TABLE bankrolls ADD COLUMN IF NOT EXISTS type VARCHAR(20) DEFAULT 'online'`);
       results.push('✅ Type column added/verified');
@@ -1464,6 +1467,64 @@ app.post('/api/migrate', async (req, res) => {
       results.push('⚠️ Session type column: ' + error.message);
     }
 
+    // ⚡ NEW: SESSIONS TABLE ENHANCEMENTS
+    try {
+      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS duration_minutes INTEGER`);
+      results.push('✅ duration_minutes column added');
+    } catch (error) {
+      results.push('⚠️ duration_minutes column: ' + error.message);
+    }
+
+    try {
+      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_buy_in DECIMAL(10,2) DEFAULT 0.00`);
+      results.push('✅ total_buy_in column added');
+    } catch (error) {
+      results.push('⚠️ total_buy_in column: ' + error.message);
+    }
+
+    try {
+      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_winnings DECIMAL(10,2) DEFAULT 0.00`);
+      results.push('✅ total_winnings column added');
+    } catch (error) {
+      results.push('⚠️ total_winnings column: ' + error.message);
+    }
+
+    try {
+      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_result DECIMAL(10,2) DEFAULT 0.00`);
+      results.push('✅ total_result column added');
+    } catch (error) {
+      results.push('⚠️ total_result column: ' + error.message);
+    }
+
+    try {
+      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_games INTEGER DEFAULT 0`);
+      results.push('✅ total_games column added');
+    } catch (error) {
+      results.push('⚠️ total_games column: ' + error.message);
+    }
+
+    try {
+      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_entries INTEGER DEFAULT 0`);
+      results.push('✅ total_entries column added');
+    } catch (error) {
+      results.push('⚠️ total_entries column: ' + error.message);
+    }
+
+    try {
+      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS hourly_rate DECIMAL(8,2)`);
+      results.push('✅ hourly_rate column added');
+    } catch (error) {
+      results.push('⚠️ hourly_rate column: ' + error.message);
+    }
+
+    try {
+      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS roi DECIMAL(5,2)`);
+      results.push('✅ roi column added');
+    } catch (error) {
+      results.push('⚠️ roi column: ' + error.message);
+    }
+
+    // ⚡ GAMES TABLE ENHANCEMENTS
     try {
       await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS name VARCHAR(255)`);
       results.push('✅ Game name column added');
@@ -1492,6 +1553,21 @@ app.post('/api/migrate', async (req, res) => {
       results.push('⚠️ Net_profit column: ' + error.message);
     }
 
+    try {
+      await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS entries INTEGER DEFAULT 1`);
+      results.push('✅ Entries column added');
+    } catch (error) {
+      results.push('⚠️ Entries column: ' + error.message);
+    }
+
+    try {
+      await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS duration_minutes INTEGER`);
+      results.push('✅ Game duration_minutes column added');
+    } catch (error) {
+      results.push('⚠️ Game duration_minutes column: ' + error.message);
+    }
+
+    // ⚡ DATA UPDATES
     await client.query(`UPDATE bankrolls SET starting_amount = initial_amount WHERE starting_amount = 0 OR starting_amount IS NULL`);
     results.push('✅ Updated starting_amount from initial_amount');
 
@@ -1500,17 +1576,17 @@ app.post('/api/migrate', async (req, res) => {
 
     await client.query('COMMIT');
 
-    console.log('✅ Migration completed!');
+    console.log('✅ Enhanced migration completed!');
 
     res.json({
       success: true,
-      message: 'Migration completed successfully',
+      message: 'Enhanced migration completed successfully',
       results: results
     });
 
   } catch (error) {
     await client.query('ROLLBACK');
-    console.error('❌ Migration failed:', error);
+    console.error('❌ Enhanced migration failed:', error);
     res.status(500).json({
       success: false,
       error: error.message,
