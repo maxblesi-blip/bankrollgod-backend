@@ -584,9 +584,7 @@ app.get('/api/bankrolls', authenticateToken, async (req, res) => {
 
     res.json({ 
       success: true, 
-      data: {
-        bankrolls: bankrollsResult.rows
-      }
+      data: bankrollsResult.rows
     });
 
   } catch (error) {
@@ -615,9 +613,7 @@ app.get('/api/bankrolls/:id', authenticateToken, async (req, res) => {
 
     res.json({ 
       success: true, 
-      data: {
-        bankroll: bankrollResult.rows[0]
-      }
+      data: bankrollResult.rows[0]
     });
 
   } catch (error) {
@@ -662,9 +658,7 @@ app.post('/api/bankrolls', authenticateToken, async (req, res) => {
 
     res.status(201).json({
       success: true,
-      data: {
-        bankroll: newBankroll.rows[0]
-      }
+      data: newBankroll.rows[0]
     });
 
   } catch (error) {
@@ -732,9 +726,7 @@ app.put('/api/bankrolls/:id', authenticateToken, async (req, res) => {
 
     res.json({
       success: true,
-      data: {
-        bankroll: updatedBankroll.rows[0]
-      }
+      data: updatedBankroll.rows[0]
     });
 
   } catch (error) {
@@ -815,6 +807,150 @@ app.get('/api/bankrolls/:id/sessions', authenticateToken, async (req, res) => {
 // =============================================================================
 // SESSION ENDPOINTS
 // =============================================================================
+
+// ⚡ GET ALL SESSIONS - FEHLTE KOMPLETT!
+app.get('/api/sessions', authenticateToken, async (req, res) => {
+  try {
+    const { 
+      bankroll_id, 
+      status, 
+      limit = 20, 
+      offset = 0,
+      include_games = 'false'
+    } = req.query;
+    
+    let whereClause = 'WHERE s.user_id = $1';
+    const params = [req.user.userId];
+    let paramCount = 2;
+    
+    if (bankroll_id) {
+      whereClause += ` AND s.bankroll_id = $${paramCount}`;
+      params.push(bankroll_id);
+      paramCount++;
+    }
+    
+    if (status) {
+      whereClause += ` AND s.status = $${paramCount}`;
+      params.push(status);
+      paramCount++;
+    }
+    
+    const sessions = await pool.query(
+      `SELECT s.*, b.name as bankroll_name, b.type as bankroll_type
+       FROM sessions s 
+       LEFT JOIN bankrolls b ON s.bankroll_id = b.id
+       ${whereClause}
+       ORDER BY s.start_time DESC 
+       LIMIT $${paramCount} OFFSET $${paramCount + 1}`,
+      [...params, parseInt(limit), parseInt(offset)]
+    );
+
+    console.log('✅ Found sessions:', sessions.rows.length);
+
+    res.json({
+      success: true,
+      data: sessions.rows,
+      count: sessions.rows.length
+    });
+
+  } catch (error) {
+    console.error('Error fetching sessions:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch sessions',
+      error: error.message
+    });
+  }
+});
+
+// ⚡ GET SINGLE SESSION - FEHLTE AUCH!
+app.get('/api/sessions/:id', authenticateToken, async (req, res) => {
+  try {
+    const session = await pool.query(
+      `SELECT s.*, b.name as bankroll_name, b.type as bankroll_type
+       FROM sessions s 
+       LEFT JOIN bankrolls b ON s.bankroll_id = b.id
+       WHERE s.id = $1 AND s.user_id = $2`,
+      [req.params.id, req.user.userId]
+    );
+
+    if (session.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Session not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: session.rows[0]
+    });
+
+  } catch (error) {
+    console.error('Error fetching session:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch session',
+      error: error.message
+    });
+  }
+});
+
+// ⚡ GET SESSION GAMES - DAS WICHTIGSTE FEHLTE!
+app.get('/api/sessions/:id/games', authenticateToken, async (req, res) => {
+  try {
+    console.log('🔍 DEBUG: Getting games for session:', req.params.id);
+    console.log('🔍 DEBUG: User ID:', req.user?.userId);
+    
+    const { status } = req.query;
+    
+    // Verify session exists and user has access
+    const session = await pool.query(
+      'SELECT * FROM sessions WHERE id = $1 AND user_id = $2',
+      [req.params.id, req.user.userId]
+    );
+    
+    if (session.rows.length === 0) {
+      console.log('❌ Session not found:', req.params.id);
+      return res.status(404).json({
+        success: false,
+        message: 'Session not found'
+      });
+    }
+    
+    let whereClause = 'WHERE g.session_id = $1';
+    const params = [req.params.id];
+    
+    if (status) {
+      whereClause += ' AND g.status = $2';
+      params.push(status);
+    }
+    
+    const games = await pool.query(
+      `SELECT g.* FROM games g 
+       ${whereClause}
+       ORDER BY g.start_time DESC`,
+      params
+    );
+
+    console.log('✅ Found games:', games.rows.length);
+
+    res.json({
+      success: true,
+      data: games.rows,
+      count: games.rows.length
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching session games:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch session games',
+      error: error.message
+    });
+  }
+});
+
 // CREATE NEW SESSION
 app.post('/api/sessions', authenticateToken, async (req, res) => {
   try {
@@ -891,9 +1027,7 @@ app.post('/api/sessions', authenticateToken, async (req, res) => {
 
     res.status(201).json({
       success: true,
-      data: {
-        session: session
-      }
+      data: session
     });
 
   } catch (error) {
@@ -936,6 +1070,7 @@ app.get('/api/sessions/active', authenticateToken, async (req, res) => {
     });
   }
 });
+
 // COMPLETE SESSION - WITH STATISTICS CALCULATION ⚡
 app.post('/api/sessions/:id/complete', authenticateToken, async (req, res) => {
   try {
@@ -1003,9 +1138,7 @@ app.post('/api/sessions/:id/complete', authenticateToken, async (req, res) => {
 
     res.json({ 
       success: true, 
-      data: {
-        session: updatedSession.rows[0]
-      }
+      data: updatedSession.rows[0]
     });
 
   } catch (error) {
@@ -1412,9 +1545,7 @@ app.get('/setup-database', async (req, res) => {
   }
 });
 
-// 🎯 ERWEITERTE MIGRATION - Füge zu deinem /api/migrate Endpoint hinzu
-
-// POST /api/migrate - In deiner server.js
+// POST /api/migrate - Enhanced migration
 app.post('/api/migrate', async (req, res) => {
   const client = await pool.connect();
   
@@ -1424,7 +1555,7 @@ app.post('/api/migrate', async (req, res) => {
 
     await client.query('BEGIN');
 
-    // ⚡ EXISTING MIGRATIONS (deine bisherigen)
+    // ⚡ EXISTING MIGRATIONS
     try {
       await client.query(`ALTER TABLE bankrolls ADD COLUMN IF NOT EXISTS type VARCHAR(20) DEFAULT 'online'`);
       results.push('✅ Type column added/verified');
@@ -1524,6 +1655,13 @@ app.post('/api/migrate', async (req, res) => {
       results.push('⚠️ roi column: ' + error.message);
     }
 
+    try {
+      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_invested DECIMAL(10,2) DEFAULT 0.00`);
+      results.push('✅ total_invested column added');
+    } catch (error) {
+      results.push('⚠️ total_invested column: ' + error.message);
+    }
+
     // ⚡ GAMES TABLE ENHANCEMENTS
     try {
       await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS name VARCHAR(255)`);
@@ -1584,8 +1722,6 @@ app.post('/api/migrate', async (req, res) => {
       results: results
     });
 
-
-
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('❌ Enhanced migration failed:', error);
@@ -1596,27 +1732,6 @@ app.post('/api/migrate', async (req, res) => {
     });
   } finally {
     client.release();
-  }
-});
-
-app.post('/api/fix-total-invested', async (req, res) => {
-  try {
-    console.log('🔧 Adding total_invested column...');
-    
-    await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_invested DECIMAL(10,2) DEFAULT 0.00`);
-    
-    console.log('✅ total_invested column added successfully');
-    
-    res.json({
-      success: true,
-      message: 'total_invested column added successfully'
-    });
-  } catch (error) {
-    console.error('❌ Error adding total_invested column:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
   }
 });
 
