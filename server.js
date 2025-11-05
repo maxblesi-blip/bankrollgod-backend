@@ -863,6 +863,38 @@ app.get('/api/sessions', authenticateToken, async (req, res) => {
   }
 });
 
+// ⚡ GET ACTIVE SESSIONS - MUSS VOR :id Route!
+app.get('/api/sessions/active', authenticateToken, async (req, res) => {
+  try {
+    console.log('🔍 Getting active sessions for user:', req.user.userId);
+
+    const activeSessions = await pool.query(
+      `SELECT s.*, b.name as bankroll_name, b.current_amount as bankroll_amount
+       FROM sessions s 
+       LEFT JOIN bankrolls b ON s.bankroll_id = b.id
+       WHERE s.user_id = $1 AND s.status = $2
+       ORDER BY s.start_time DESC`,
+      [req.user.userId, 'running']
+    );
+
+    console.log('✅ Found active sessions:', activeSessions.rows.length);
+
+    res.json({
+      success: true,
+      data: {
+        sessions: activeSessions.rows
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching active sessions:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch active sessions: ' + error.message
+    });
+  }
+});
+
 // ⚡ GET SINGLE SESSION - FEHLTE AUCH!
 app.get('/api/sessions/:id', authenticateToken, async (req, res) => {
   try {
