@@ -1584,6 +1584,8 @@ app.post('/api/migrate', async (req, res) => {
       results: results
     });
 
+
+
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('❌ Enhanced migration failed:', error);
@@ -1594,6 +1596,27 @@ app.post('/api/migrate', async (req, res) => {
     });
   } finally {
     client.release();
+  }
+});
+
+app.post('/api/fix-total-invested', async (req, res) => {
+  try {
+    console.log('🔧 Adding total_invested column...');
+    
+    await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_invested DECIMAL(10,2) DEFAULT 0.00`);
+    
+    console.log('✅ total_invested column added successfully');
+    
+    res.json({
+      success: true,
+      message: 'total_invested column added successfully'
+    });
+  } catch (error) {
+    console.error('❌ Error adding total_invested column:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
   }
 });
 
