@@ -4,7 +4,7 @@ const { Session, Bankroll, Game } = require('../models');
 const router = express.Router();
 
 // ⚡ CRITICAL: Add authentication middleware
-const authenticateToken = require('../middleware/auth'); // Adjust path to your auth middleware
+const authenticateToken = require('../middleware/auth');
 
 // Validation middleware
 const handleValidationErrors = (req, res, next) => {
@@ -18,6 +18,71 @@ const handleValidationErrors = (req, res, next) => {
   }
   next();
 };
+
+// 🔧 NEW: Check for active session conflicts
+const checkActiveSessionConflict = async (bankrollId, excludeSessionId = null) => {
+  const whereClause = { 
+    bankroll_id: bankrollId, 
+    status: 'running' 
+  };
+  
+  if (excludeSessionId) {
+    whereClause.id = { [require('sequelize').Op.ne]: excludeSessionId };
+  }
+  
+  const activeSession = await Session.findOne({
+    where: whereClause,
+    include: [
+      {
+        model: Bankroll,
+        as: 'bankroll',
+        attributes: ['id', 'name', 'type', 'currency']
+      }
+    ]
+  });
+  
+  return activeSession;
+};
+
+// 🔧 NEW: GET /api/sessions/check-conflicts/:bankrollId - Check for active sessions
+router.get('/check-conflicts/:bankrollId', [
+  param('bankrollId').isUUID().withMessage('Invalid bankroll ID')
+], authenticateToken, handleValidationErrors, async (req, res) => {
+  try {
+    const { bankrollId } = req.params;
+    
+    // Verify bankroll exists and user has access
+    const bankroll = await Bankroll.findByPk(bankrollId);
+    if (!bankroll) {
+      return res.status(404).json({
+        success: false,
+        message: 'Bankroll not found'
+      });
+    }
+    
+    if (bankroll.user_id !== req.user.userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+    
+    const activeSession = await checkActiveSessionConflict(bankrollId);
+    
+    res.json({
+      success: true,
+      hasActiveSession: !!activeSession,
+      activeSession: activeSession || null
+    });
+  } catch (error) {
+    console.error('Error checking session conflicts:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to check session conflicts',
+      error: error.message
+    });
+  }
+});
 
 // GET /api/sessions - Get all sessions
 router.get('/', authenticateToken, async (req, res) => {
@@ -38,7 +103,8 @@ router.get('/', authenticateToken, async (req, res) => {
       {
         model: Bankroll,
         as: 'bankroll',
-        attributes: ['id', 'name', 'type']
+        attributes: ['id', 'name', 'type', 'currency'],
+        where: { user_id: req.user.userId } // Ensure user only sees their sessions
       }
     ];
     
@@ -73,21 +139,134 @@ router.get('/', authenticateToken, async (req, res) => {
   }
 });
 
-// GET /api/sessions/active - Get active sessions
+// 🔧 ENHANCED: GET /api/sessions/active - Get active sessions with user filtering
 router.get('/active', authenticateToken, async (req, res) => {
   try {
-    const sessions = await Session.findActive();
+    console.log('🔍 Fetching active sessions for user:', req.user.userId);
+    
+    const sessions = await Session.findAll({
+      where: { status: 'running' },
+      include: [
+        {
+          model: Bankroll,
+          as: 'bankroll',
+          attributes: ['id', 'name', 'type', 'currency'],
+          where: { user_id: req.user.userId }
+        },
+        {
+          model: Game,
+          as: 'games',
+          required: false,
+          order: [['start_time', 'DESC']],
+          limit: 5
+        }
+      ],
+      order: [['start_time', 'DESC']]
+    });
+    
+    console.log('✅ Found active sessions:', sessions.length);
+    
+    // Calculate session metadata
+    const enrichedSessions = sessions.map(session => {
+      const sessionData = session.toJSON();
+      
+      // Calculate current duration
+      if (session.start_time) {
+        const now = new Date();
+        const startTime = new Date(session.start_time);
+        sessionData.current_duration_minutes = Math.round((now - startTime) / (1000 * 60));
+      }
+      
+      // Calculate current stats from games
+      if (sessionData.games && sessionData.games.length > 0) {
+        let totalBuyIn = 0;
+        let totalWinnings = 0;
+        
+        for (const game of sessionData.games) {
+          totalBuyIn += parseFloat(game.buy_in || 0) * (game.entries || 1);
+          totalWinnings += parseFloat(game.winnings || 0);
+        }
+        
+        sessionData.current_total_buy_in = totalBuyIn;
+        sessionData.current_total_winnings = totalWinnings;
+        sessionData.current_total_result = totalWinnings - totalBuyIn;
+      }
+      
+      return sessionData;
+    });
     
     res.json({
       success: true,
-      data: sessions,
-      count: sessions.length
+      data: enrichedSessions,
+      count: enrichedSessions.length
     });
   } catch (error) {
     console.error('Error fetching active sessions:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to fetch active sessions',
+      error: error.message
+    });
+  }
+});
+
+// 🔧 NEW: POST /api/sessions/resume/:id - Resume an active session
+router.post('/resume/:id', [
+  param('id').isUUID().withMessage('Invalid session ID')
+], authenticateToken, handleValidationErrors, async (req, res) => {
+  try {
+    const session = await Session.findByPk(req.params.id, {
+      include: [
+        {
+          model: Bankroll,
+          as: 'bankroll',
+          attributes: ['id', 'name', 'type', 'currency']
+        }
+      ]
+    });
+    
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        message: 'Session not found'
+      });
+    }
+    
+    // Check user access
+    const bankroll = await Bankroll.findByPk(session.bankroll_id);
+    if (!bankroll || bankroll.user_id !== req.user.userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+    
+    if (session.status !== 'running') {
+      return res.status(400).json({
+        success: false,
+        message: 'Can only resume running sessions'
+      });
+    }
+    
+    // Update session metadata to indicate it was resumed
+    await session.update({
+      notes: session.notes ? 
+        `${session.notes}\n[Session resumed at ${new Date().toLocaleString()}]` :
+        `[Session resumed at ${new Date().toLocaleString()}]`
+    });
+    
+    console.log('✅ Session resumed:', session.id, 'by user:', req.user.userId);
+    
+    res.json({
+      success: true,
+      message: 'Session resumed successfully',
+      data: session
+    });
+  } catch (error) {
+    console.error('Error resuming session:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to resume session',
       error: error.message
     });
   }
@@ -103,7 +282,7 @@ router.get('/:id', [
         {
           model: Bankroll,
           as: 'bankroll',
-          attributes: ['id', 'name', 'type']
+          attributes: ['id', 'name', 'type', 'currency']
         },
         {
           model: Game,
@@ -143,62 +322,7 @@ router.get('/:id', [
   }
 });
 
-// ⚡ FIXED: GET /api/sessions/:id/games - Get games for session
-router.get('/:id/games', [
-  param('id').isUUID().withMessage('Invalid session ID')
-], authenticateToken, handleValidationErrors, async (req, res) => {
-  try {
-    console.log('🔍 DEBUG: Getting games for session:', req.params.id);
-    console.log('🔍 DEBUG: User ID:', req.user?.userId);
-    
-    const { status } = req.query;
-    
-    // Verify session exists and user has access
-    const session = await Session.findByPk(req.params.id);
-    if (!session) {
-      console.log('❌ Session not found:', req.params.id);
-      return res.status(404).json({
-        success: false,
-        message: 'Session not found'
-      });
-    }
-    
-    // Check if user has access through bankroll ownership
-    const bankroll = await Bankroll.findByPk(session.bankroll_id);
-    if (!bankroll || bankroll.user_id !== req.user.userId) {
-      console.log('❌ Access denied for session:', req.params.id, 'bankroll user:', bankroll?.user_id, 'request user:', req.user.userId);
-      return res.status(403).json({
-        success: false,
-        message: 'Access denied'
-      });
-    }
-    
-    const whereClause = { session_id: req.params.id };
-    if (status) whereClause.status = status;
-    
-    const games = await Game.findAll({
-      where: whereClause,
-      order: [['start_time', 'DESC']]
-    });
-    
-    console.log('✅ Found games:', games.length);
-    
-    res.json({
-      success: true,
-      data: games,
-      count: games.length
-    });
-  } catch (error) {
-    console.error('❌ Error fetching session games:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to fetch session games',
-      error: error.message
-    });
-  }
-});
-
-// POST /api/sessions - Create new session
+// 🔧 ENHANCED: POST /api/sessions - Create new session with conflict resolution
 router.post('/', [
   body('name')
     .trim()
@@ -221,11 +345,21 @@ router.post('/', [
     .optional()
     .trim()
     .isLength({ max: 1000 })
-    .withMessage('Notes must be 1000 characters or less')
+    .withMessage('Notes must be 1000 characters or less'),
+  body('force_create')
+    .optional()
+    .isBoolean()
+    .withMessage('force_create must be a boolean'),
+  body('action_on_conflict')
+    .optional()
+    .isIn(['pause_existing', 'complete_existing', 'fail'])
+    .withMessage('action_on_conflict must be one of: pause_existing, complete_existing, fail')
 ], authenticateToken, handleValidationErrors, async (req, res) => {
   try {
+    const { bankroll_id, force_create = false, action_on_conflict = 'fail' } = req.body;
+    
     // Verify bankroll exists and belongs to user
-    const bankroll = await Bankroll.findByPk(req.body.bankroll_id);
+    const bankroll = await Bankroll.findByPk(bankroll_id);
     if (!bankroll) {
       return res.status(404).json({
         success: false,
@@ -240,7 +374,80 @@ router.post('/', [
       });
     }
     
-    const session = await Session.create(req.body);
+    // Check for active session conflicts
+    const activeSession = await checkActiveSessionConflict(bankroll_id);
+    
+    if (activeSession && !force_create) {
+      return res.status(409).json({
+        success: false,
+        message: 'There is already an active session for this bankroll',
+        error: 'ACTIVE_SESSION_EXISTS',
+        activeSession: {
+          id: activeSession.id,
+          name: activeSession.name,
+          start_time: activeSession.start_time,
+          bankroll: activeSession.bankroll
+        },
+        suggested_actions: [
+          { action: 'resume', label: 'Resume existing session' },
+          { action: 'pause_existing', label: 'Pause existing and create new' },
+          { action: 'complete_existing', label: 'Complete existing and create new' }
+        ]
+      });
+    }
+    
+    // Handle conflict resolution if force_create is true
+    if (activeSession && force_create) {
+      switch (action_on_conflict) {
+        case 'pause_existing':
+          activeSession.status = 'paused';
+          await activeSession.save();
+          console.log('⏸️ Paused existing session:', activeSession.id);
+          break;
+          
+        case 'complete_existing':
+          // Complete the existing session
+          activeSession.status = 'completed';
+          activeSession.end_time = new Date();
+          
+          // Calculate duration
+          if (activeSession.start_time) {
+            const startTime = new Date(activeSession.start_time);
+            const endTime = new Date();
+            activeSession.duration_minutes = Math.round((endTime - startTime) / (1000 * 60));
+          }
+          
+          // Update stats
+          await activeSession.updateStatsFromGames();
+          await activeSession.save();
+          
+          // Update bankroll stats
+          await bankroll.updateStats();
+          
+          console.log('✅ Completed existing session:', activeSession.id);
+          break;
+          
+        case 'fail':
+        default:
+          return res.status(409).json({
+            success: false,
+            message: 'Active session exists and no action specified'
+          });
+      }
+    }
+    
+    // Create new session
+    const sessionData = {
+      ...req.body,
+      status: 'running',
+      start_time: new Date()
+    };
+    
+    // Remove conflict resolution fields
+    delete sessionData.force_create;
+    delete sessionData.action_on_conflict;
+    
+    const session = await Session.create(sessionData);
     
     // Include bankroll info in response
     const sessionWithBankroll = await Session.findByPk(session.id, {
@@ -248,15 +455,18 @@ router.post('/', [
         {
           model: Bankroll,
           as: 'bankroll',
-          attributes: ['id', 'name', 'type']
+          attributes: ['id', 'name', 'type', 'currency']
         }
       ]
     });
     
+    console.log('✅ New session created:', session.id, 'for bankroll:', bankroll_id);
+    
     res.status(201).json({
       success: true,
       message: 'Session created successfully',
-      data: sessionWithBankroll
+      data: sessionWithBankroll,
+      previousSessionAction: activeSession ? action_on_conflict : null
     });
   } catch (error) {
     console.error('Error creating session:', error);
@@ -328,7 +538,57 @@ router.put('/:id', [
   }
 });
 
-// ⚡ FIXED: POST /api/sessions/:id/complete - Complete session
+// 🔧 NEW: POST /api/sessions/:id/pause - Pause session
+router.post('/:id/pause', [
+  param('id').isUUID().withMessage('Invalid session ID')
+], authenticateToken, handleValidationErrors, async (req, res) => {
+  try {
+    const session = await Session.findByPk(req.params.id);
+    
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        message: 'Session not found'
+      });
+    }
+    
+    // Check user access
+    const bankroll = await Bankroll.findByPk(session.bankroll_id);
+    if (!bankroll || bankroll.user_id !== req.user.userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+    
+    if (session.status !== 'running') {
+      return res.status(400).json({
+        success: false,
+        message: 'Can only pause running sessions'
+      });
+    }
+    
+    session.status = 'paused';
+    await session.save();
+    
+    console.log('⏸️ Session paused:', session.id);
+    
+    res.json({
+      success: true,
+      message: 'Session paused successfully',
+      data: session
+    });
+  } catch (error) {
+    console.error('Error pausing session:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to pause session',
+      error: error.message
+    });
+  }
+});
+
+// POST /api/sessions/:id/complete - Complete session
 router.post('/:id/complete', [
   param('id').isUUID().withMessage('Invalid session ID')
 ], authenticateToken, handleValidationErrors, async (req, res) => {
@@ -365,7 +625,7 @@ router.post('/:id/complete', [
     
     console.log('🔧 DEBUG: About to complete session...');
     
-    // ⚡ MANUAL SESSION COMPLETION (safer than model method)
+    // Manual session completion
     session.status = 'completed';
     session.end_time = new Date();
     
@@ -415,7 +675,7 @@ router.post('/:id/complete', [
     await session.save();
     console.log('✅ DEBUG: Session completed successfully');
     
-    // Update bankroll stats if method exists
+    // Update bankroll stats
     try {
       if (bankroll && typeof bankroll.updateStats === 'function') {
         await bankroll.updateStats();
@@ -442,40 +702,56 @@ router.post('/:id/complete', [
   }
 });
 
-// DELETE /api/sessions/:id - Delete session
-router.delete('/:id', [
+// GET /api/sessions/:id/games - Get games for session  
+router.get('/:id/games', [
   param('id').isUUID().withMessage('Invalid session ID')
 ], authenticateToken, handleValidationErrors, async (req, res) => {
   try {
-    const session = await Session.findByPk(req.params.id);
+    console.log('🔍 DEBUG: Getting games for session:', req.params.id);
+    console.log('🔍 DEBUG: User ID:', req.user?.userId);
     
+    const { status } = req.query;
+    
+    // Verify session exists and user has access
+    const session = await Session.findByPk(req.params.id);
     if (!session) {
+      console.log('❌ Session not found:', req.params.id);
       return res.status(404).json({
         success: false,
         message: 'Session not found'
       });
     }
     
-    // Check user access
+    // Check if user has access through bankroll ownership
     const bankroll = await Bankroll.findByPk(session.bankroll_id);
     if (!bankroll || bankroll.user_id !== req.user.userId) {
+      console.log('❌ Access denied for session:', req.params.id, 'bankroll user:', bankroll?.user_id, 'request user:', req.user.userId);
       return res.status(403).json({
         success: false,
         message: 'Access denied'
       });
     }
     
-    await session.destroy();
+    const whereClause = { session_id: req.params.id };
+    if (status) whereClause.status = status;
+    
+    const games = await Game.findAll({
+      where: whereClause,
+      order: [['start_time', 'DESC']]
+    });
+    
+    console.log('✅ Found games:', games.length);
     
     res.json({
       success: true,
-      message: 'Session deleted successfully'
+      data: games,
+      count: games.length
     });
   } catch (error) {
-    console.error('Error deleting session:', error);
+    console.error('❌ Error fetching session games:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to delete session',
+      message: 'Failed to fetch session games',
       error: error.message
     });
   }
@@ -577,6 +853,45 @@ router.post('/:id/update-stats', [
     res.status(500).json({
       success: false,
       message: 'Failed to update session statistics',
+      error: error.message
+    });
+  }
+});
+
+// DELETE /api/sessions/:id - Delete session
+router.delete('/:id', [
+  param('id').isUUID().withMessage('Invalid session ID')
+], authenticateToken, handleValidationErrors, async (req, res) => {
+  try {
+    const session = await Session.findByPk(req.params.id);
+    
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        message: 'Session not found'
+      });
+    }
+    
+    // Check user access
+    const bankroll = await Bankroll.findByPk(session.bankroll_id);
+    if (!bankroll || bankroll.user_id !== req.user.userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+    
+    await session.destroy();
+    
+    res.json({
+      success: true,
+      message: 'Session deleted successfully'
+    });
+  } catch (error) {
+    console.error('Error deleting session:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete session',
       error: error.message
     });
   }
