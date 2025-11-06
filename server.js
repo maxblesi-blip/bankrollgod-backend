@@ -1472,6 +1472,17 @@ app.patch('/api/games/:id/entries', authenticateToken, async (req, res) => {
   }
 });
 
+// ⚡ ADD: GET /api/games (with session filtering)
+app.get('/api/games', authenticateToken, async (req, res) => {
+  // ... der ganze GET code ...
+});
+
+// ⚡ ADD: PUT /api/games/:id (general game updates)  
+app.put('/api/games/:id', authenticateToken, async (req, res) => {
+  // ... der ganze PUT code ...
+});
+
+
 // =============================================================================
 // DATABASE SETUP & MIGRATION ENDPOINTS
 // =============================================================================
