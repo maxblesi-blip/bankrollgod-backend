@@ -1472,9 +1472,53 @@ app.patch('/api/games/:id/entries', authenticateToken, async (req, res) => {
   }
 });
 
-// ⚡ ADD: GET /api/games (with session filtering)
+// ⚡ GET /api/games (with session filtering)
 app.get('/api/games', authenticateToken, async (req, res) => {
-  // ... der ganze GET code ...
+  try {
+    const { session_id, status, limit = 50, offset = 0 } = req.query;
+    
+    let whereClause = 'WHERE g.user_id = $1';
+    const params = [req.user.userId];
+    let paramCount = 2;
+    
+    if (session_id) {
+      whereClause += ` AND g.session_id = $${paramCount}`;
+      params.push(session_id);
+      paramCount++;
+    }
+    
+    if (status) {
+      whereClause += ` AND g.status = $${paramCount}`;
+      params.push(status);
+      paramCount++;
+    }
+    
+    const games = await pool.query(
+      `SELECT g.*, s.name as session_name 
+       FROM games g 
+       LEFT JOIN sessions s ON g.session_id = s.id
+       ${whereClause}
+       ORDER BY g.start_time DESC 
+       LIMIT $${paramCount} OFFSET $${paramCount + 1}`,
+      [...params, parseInt(limit), parseInt(offset)]
+    );
+
+    console.log('✅ Found games for session:', games.rows.length);
+
+    res.json({
+      success: true,
+      data: games.rows,
+      count: games.rows.length
+    });
+
+  } catch (error) {
+    console.error('Error fetching games:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch games',
+      error: error.message
+    });
+  }
 });
 
 // ⚡ ADD: PUT /api/games/:id (general game updates)  
