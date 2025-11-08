@@ -1633,7 +1633,8 @@ app.get('/setup-database', async (req, res) => {
 });
 
 // =============================================================================
-// STATISTICS ENDPOINTS - Füge diesen Block in server.js ein
+// STATISTICS ENDPOINTS - KORRIGIERT: Berechnet Buy-Ins aus Games
+// Ersetze die alten Statistics-Routes in server.js mit diesem Code
 // =============================================================================
 
 // GET /api/statistics/bankroll/:bankrollId
@@ -1688,11 +1689,11 @@ app.get('/api/statistics/bankroll/:bankrollId', authenticateToken, async (req, r
     // Calculate statistics based on filter
     let stats;
     if (filter === 'cashgames') {
-      stats = calculateCashgameStats(sessions, allGames);
+      stats = calculateCashgameStatsFromGames(sessions, allGames);
     } else if (filter === 'tournaments') {
-      stats = calculateTournamentStats(sessions, allGames);
+      stats = calculateTournamentStatsFromGames(sessions, allGames);
     } else {
-      stats = calculateAllStats(sessions, allGames);
+      stats = calculateAllStatsFromGames(sessions, allGames);
     }
     
     res.json({
@@ -1759,10 +1760,10 @@ app.get('/api/statistics/overview', authenticateToken, async (req, res) => {
 });
 
 // =============================================================================
-// STATISTICS HELPER FUNCTIONS
+// STATISTICS HELPER FUNCTIONS - KORRIGIERT
 // =============================================================================
 
-function calculateAllStats(sessions, games) {
+function calculateAllStatsFromGames(sessions, games) {
   if (sessions.length === 0) {
     return {
       totalProfit: 0,
@@ -1779,11 +1780,18 @@ function calculateAllStats(sessions, games) {
   let totalBuyIns = 0;
   let totalPlaytime = 0;
   
+  // Berechne aus Sessions
   sessions.forEach(session => {
     totalProfit += parseFloat(session.total_result || 0);
-    totalBuyIns += parseFloat(session.total_buy_in || 0);
     totalPlaytime += parseFloat(session.duration_minutes || 0);
   });
+  
+  // Berechne Buy-Ins aus GAMES (nicht aus Sessions!)
+  games.forEach(game => {
+    totalBuyIns += parseFloat(game.total_buy_in || 0);
+  });
+  
+  console.log(`💰 Total Buy-Ins from games: ${totalBuyIns}`);
   
   const avgProfitPerHour = totalPlaytime > 0 ? (totalProfit / (totalPlaytime / 60)) : 0;
   const avgProfitPerSession = sessions.length > 0 ? totalProfit / sessions.length : 0;
@@ -1800,11 +1808,10 @@ function calculateAllStats(sessions, games) {
   };
 }
 
-function calculateCashgameStats(sessions, games) {
+function calculateCashgameStatsFromGames(sessions, games) {
   const cashgames = games.filter(g => g.type === 'cashgame');
-  const cashgameSessions = sessions.filter(s => s.cash_games_played > 0);
   
-  if (cashgameSessions.length === 0) {
+  if (cashgames.length === 0) {
     return {
       totalProfit: 0,
       totalSessions: 0,
@@ -1816,15 +1823,26 @@ function calculateCashgameStats(sessions, games) {
     };
   }
   
+  // Sessions die Cashgames enthalten
+  const cashgameSessionIds = new Set(cashgames.map(g => g.session_id));
+  const cashgameSessions = sessions.filter(s => cashgameSessionIds.has(s.id));
+  
   let totalProfit = 0;
   let totalBuyIns = 0;
   let totalPlaytime = 0;
   
+  // Profit und Zeit aus Sessions
   cashgameSessions.forEach(session => {
     totalProfit += parseFloat(session.total_result || 0);
-    totalBuyIns += parseFloat(session.total_buy_in || 0);
     totalPlaytime += parseFloat(session.duration_minutes || 0);
   });
+  
+  // Buy-Ins aus Cashgames
+  cashgames.forEach(game => {
+    totalBuyIns += parseFloat(game.total_buy_in || 0);
+  });
+  
+  console.log(`💰 Cashgame Buy-Ins: ${totalBuyIns}`);
   
   const avgProfitPerHour = totalPlaytime > 0 ? (totalProfit / (totalPlaytime / 60)) : 0;
   const avgProfitPerSession = cashgameSessions.length > 0 ? totalProfit / cashgameSessions.length : 0;
@@ -1841,7 +1859,7 @@ function calculateCashgameStats(sessions, games) {
   };
 }
 
-function calculateTournamentStats(sessions, games) {
+function calculateTournamentStatsFromGames(sessions, games) {
   const tournaments = games.filter(g => ['tournament', 'sng', 'mtt'].includes(g.type));
   
   if (tournaments.length === 0) {
@@ -1864,15 +1882,21 @@ function calculateTournamentStats(sessions, games) {
   let itmCount = 0;
   
   tournaments.forEach(t => {
-    totalProfit += parseFloat(t.net_result || 0);
-    totalBuyIns += parseFloat(t.total_buy_in || 0);
+    const netResult = parseFloat(t.net_result || 0);
+    const buyIn = parseFloat(t.total_buy_in || 0);
+    
+    totalProfit += netResult;
+    totalBuyIns += buyIn;
     totalEntries += t.entries || 1;
     totalPlaytime += parseFloat(t.duration_minutes || 0);
     
-    if (t.itm === true || parseFloat(t.net_result || 0) > 0) {
+    // ITM = In The Money (Gewinn gemacht)
+    if (t.itm === true || netResult > 0) {
       itmCount++;
     }
   });
+  
+  console.log(`💰 Tournament Buy-Ins: ${totalBuyIns}`);
   
   const avgBuyIn = tournaments.length > 0 ? totalBuyIns / tournaments.length : 0;
   const itmRatio = tournaments.length > 0 ? (itmCount / tournaments.length) * 100 : 0;
@@ -1889,196 +1913,6 @@ function calculateTournamentStats(sessions, games) {
     totalBuyIns
   };
 }
-
-// POST /api/migrate - Enhanced migration
-app.post('/api/migrate', async (req, res) => {
-  const client = await pool.connect();
-  
-  try {
-    console.log('🔧 Starting enhanced migration...');
-    const results = [];
-
-    await client.query('BEGIN');
-
-    // ⚡ EXISTING MIGRATIONS
-    try {
-      await client.query(`ALTER TABLE bankrolls ADD COLUMN IF NOT EXISTS type VARCHAR(20) DEFAULT 'online'`);
-      results.push('✅ Type column added/verified');
-    } catch (error) {
-      results.push('⚠️ Type column: ' + error.message);
-    }
-
-    try {
-      await client.query(`ALTER TABLE bankrolls ADD COLUMN IF NOT EXISTS currency VARCHAR(3) DEFAULT 'USD'`);
-      results.push('✅ Currency column added');
-    } catch (error) {
-      results.push('⚠️ Currency column: ' + error.message);
-    }
-
-    try {
-      await client.query(`ALTER TABLE bankrolls ADD COLUMN IF NOT EXISTS starting_amount DECIMAL(15,2) DEFAULT 0`);
-      results.push('✅ Starting_amount column added');
-    } catch (error) {
-      results.push('⚠️ Starting_amount column: ' + error.message);
-    }
-
-    try {
-      await client.query(`ALTER TABLE bankrolls ADD COLUMN IF NOT EXISTS goal_amount DECIMAL(15,2)`);
-      results.push('✅ Goal_amount column added');
-    } catch (error) {
-      results.push('⚠️ Goal_amount column: ' + error.message);
-    }
-
-    try {
-      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS name VARCHAR(255)`);
-      results.push('✅ Session name column added');
-    } catch (error) {
-      results.push('⚠️ Session name column: ' + error.message);
-    }
-
-    try {
-      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS session_type VARCHAR(100)`);
-      results.push('✅ Session type column added');
-    } catch (error) {
-      results.push('⚠️ Session type column: ' + error.message);
-    }
-
-    // ⚡ NEW: SESSIONS TABLE ENHANCEMENTS
-    try {
-      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS duration_minutes INTEGER`);
-      results.push('✅ duration_minutes column added');
-    } catch (error) {
-      results.push('⚠️ duration_minutes column: ' + error.message);
-    }
-
-    try {
-      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_buy_in DECIMAL(10,2) DEFAULT 0.00`);
-      results.push('✅ total_buy_in column added');
-    } catch (error) {
-      results.push('⚠️ total_buy_in column: ' + error.message);
-    }
-
-    try {
-      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_winnings DECIMAL(10,2) DEFAULT 0.00`);
-      results.push('✅ total_winnings column added');
-    } catch (error) {
-      results.push('⚠️ total_winnings column: ' + error.message);
-    }
-
-    try {
-      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_result DECIMAL(10,2) DEFAULT 0.00`);
-      results.push('✅ total_result column added');
-    } catch (error) {
-      results.push('⚠️ total_result column: ' + error.message);
-    }
-
-    try {
-      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_games INTEGER DEFAULT 0`);
-      results.push('✅ total_games column added');
-    } catch (error) {
-      results.push('⚠️ total_games column: ' + error.message);
-    }
-
-    try {
-      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_entries INTEGER DEFAULT 0`);
-      results.push('✅ total_entries column added');
-    } catch (error) {
-      results.push('⚠️ total_entries column: ' + error.message);
-    }
-
-    try {
-      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS hourly_rate DECIMAL(8,2)`);
-      results.push('✅ hourly_rate column added');
-    } catch (error) {
-      results.push('⚠️ hourly_rate column: ' + error.message);
-    }
-
-    try {
-      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS roi DECIMAL(5,2)`);
-      results.push('✅ roi column added');
-    } catch (error) {
-      results.push('⚠️ roi column: ' + error.message);
-    }
-
-    try {
-      await client.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_invested DECIMAL(10,2) DEFAULT 0.00`);
-      results.push('✅ total_invested column added');
-    } catch (error) {
-      results.push('⚠️ total_invested column: ' + error.message);
-    }
-
-    // ⚡ GAMES TABLE ENHANCEMENTS
-    try {
-      await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS name VARCHAR(255)`);
-      results.push('✅ Game name column added');
-    } catch (error) {
-      results.push('⚠️ Game name column: ' + error.message);
-    }
-
-    try {
-      await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS type VARCHAR(50)`);
-      results.push('✅ Game type column added');
-    } catch (error) {
-      results.push('⚠️ Game type column: ' + error.message);
-    }
-
-    try {
-      await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS winnings DECIMAL(15,2) DEFAULT 0`);
-      results.push('✅ Winnings column added');
-    } catch (error) {
-      results.push('⚠️ Winnings column: ' + error.message);
-    }
-
-    try {
-      await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS net_profit DECIMAL(15,2) DEFAULT 0`);
-      results.push('✅ Net_profit column added');
-    } catch (error) {
-      results.push('⚠️ Net_profit column: ' + error.message);
-    }
-
-    try {
-      await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS entries INTEGER DEFAULT 1`);
-      results.push('✅ Entries column added');
-    } catch (error) {
-      results.push('⚠️ Entries column: ' + error.message);
-    }
-
-    try {
-      await client.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS duration_minutes INTEGER`);
-      results.push('✅ Game duration_minutes column added');
-    } catch (error) {
-      results.push('⚠️ Game duration_minutes column: ' + error.message);
-    }
-
-    // ⚡ DATA UPDATES
-    await client.query(`UPDATE bankrolls SET starting_amount = initial_amount WHERE starting_amount = 0 OR starting_amount IS NULL`);
-    results.push('✅ Updated starting_amount from initial_amount');
-
-    await client.query(`UPDATE bankrolls SET currency = 'USD' WHERE currency IS NULL OR currency = ''`);
-    results.push('✅ Set default currency to USD');
-
-    await client.query('COMMIT');
-
-    console.log('✅ Enhanced migration completed!');
-
-    res.json({
-      success: true,
-      message: 'Enhanced migration completed successfully',
-      results: results
-    });
-
-  } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('❌ Enhanced migration failed:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-      hint: 'Check server logs for details'
-    });
-  } finally {
-    client.release();
-  }
-});
 
 // =============================================================================
 // ERROR HANDLERS
