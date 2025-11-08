@@ -1761,7 +1761,9 @@ app.get('/api/statistics/overview', authenticateToken, async (req, res) => {
 });
 
 // =============================================================================
-// STATISTICS HELPER FUNCTIONS - FINALE VERSION
+// STATISTICS HELPER FUNCTIONS - FINALE KORREKTE VERSION
+// Ersetze ALLE 3 Funktionen in server.js mit diesem Code
+// Lösche ALLE alten Versionen und lose Code-Schnipsel
 // =============================================================================
 
 function calculateAllStatsFromGames(sessions, games) {
@@ -1781,13 +1783,11 @@ function calculateAllStatsFromGames(sessions, games) {
   let totalBuyIns = 0;
   let totalPlaytime = 0;
   
-  // Berechne aus Sessions
   sessions.forEach(session => {
     totalProfit += parseFloat(session.total_result || 0);
     totalPlaytime += parseFloat(session.duration_minutes || 0);
   });
   
-  // Berechne Buy-Ins aus GAMES
   games.forEach(game => {
     const buyIn = parseFloat(game.buy_in || 0);
     totalBuyIns += buyIn;
@@ -1825,7 +1825,6 @@ function calculateCashgameStatsFromGames(sessions, games) {
     };
   }
   
-  // Sessions die Cashgames enthalten
   const cashgameSessionIds = new Set(cashgames.map(g => g.session_id));
   const cashgameSessions = sessions.filter(s => cashgameSessionIds.has(s.id));
   
@@ -1833,13 +1832,11 @@ function calculateCashgameStatsFromGames(sessions, games) {
   let totalBuyIns = 0;
   let totalPlaytime = 0;
   
-  // Profit und Zeit aus Sessions
   cashgameSessions.forEach(session => {
     totalProfit += parseFloat(session.total_result || 0);
     totalPlaytime += parseFloat(session.duration_minutes || 0);
   });
   
-  // Buy-Ins aus Cashgames
   cashgames.forEach(game => {
     const buyIn = parseFloat(game.buy_in || 0);
     totalBuyIns += buyIn;
@@ -1902,7 +1899,6 @@ function calculateTournamentStatsFromGames(sessions, games) {
     totalEntries += parseInt(t.entries || 1);
     totalPlaytime += parseFloat(t.duration_minutes || 0);
     
-    // ITM = In The Money (Gewinn gemacht)
     if (t.itm === true || profitLoss > 0) {
       itmCount++;
     }
@@ -1920,232 +1916,6 @@ function calculateTournamentStatsFromGames(sessions, games) {
   console.log(`   - AVG Buy-In: ${avgBuyIn}`);
   console.log(`   - ITM Ratio: ${itmRatio}%`);
   console.log(`   - Total ROI: ${totalROI}%`);
-  
-  return {
-    totalProfit,
-    totalTournaments: tournaments.length,
-    totalEntries,
-    totalPlaytime,
-    itmRatio,
-    totalROI,
-    avgBuyIn,
-    totalBuyIns
-  };
-}
-
-// =============================================================================
-// STATISTICS HELPER FUNCTIONS - RICHTIGE FELDNAMEN
-// =============================================================================
-
-function calculateAllStatsFromGames(sessions, games) {
-  if (sessions.length === 0) {
-    return {
-      totalProfit: 0,
-      avgProfitPerHour: 0,
-      avgProfitPerSession: 0,
-      totalPlaytime: 0,
-      totalROI: 0,
-      totalCosts: 0,
-      totalSessions: 0
-    };
-  }
-  
-  let totalProfit = 0;
-  let totalBuyIns = 0;
-  let totalPlaytime = 0;
-  
-  // Berechne aus Sessions
-  sessions.forEach(session => {
-    totalProfit += parseFloat(session.total_result || 0);
-    totalPlaytime += parseFloat(session.duration_minutes || 0);
-  });
-  
-  // Berechne Buy-Ins aus GAMES mit RICHTIGEN Feldnamen
-  games.forEach(game => {
-    // Für Cashgames: buy_in
-    // Für Turniere: buy_in oder prize_money - cash_out (je nach Typ)
-    const buyIn = parseFloat(game.buy_in || 0);
-    totalBuyIns += buyIn;
-  });
-  
-  console.log(`💰 Total Buy-Ins from ${games.length} games: ${totalBuyIns}`);
-  
-  const avgProfitPerHour = totalPlaytime > 0 ? (totalProfit / (totalPlaytime / 60)) : 0;
-  const avgProfitPerSession = sessions.length > 0 ? totalProfit / sessions.length : 0;
-  const totalROI = totalBuyIns > 0 ? (totalProfit / totalBuyIns) * 100 : 0;
-  
-  return {
-    totalProfit,
-    avgProfitPerHour,
-    avgProfitPerSession,
-    totalPlaytime,
-    totalROI,
-    totalCosts: totalBuyIns,
-    totalSessions: sessions.length
-  };
-}
-
-function calculateCashgameStatsFromGames(sessions, games) {
-  const cashgames = games.filter(g => g.type === 'cashgame');
-  
-  if (cashgames.length === 0) {
-    return {
-      totalProfit: 0,
-      totalSessions: 0,
-      totalPlaytime: 0,
-      avgProfitPerHour: 0,
-      avgProfitPerSession: 0,
-      totalROI: 0,
-      totalBuyIns: 0
-    };
-  }
-  
-  // Sessions die Cashgames enthalten
-  const cashgameSessionIds = new Set(cashgames.map(g => g.session_id));
-  const cashgameSessions = sessions.filter(s => cashgameSessionIds.has(s.id));
-  
-  let totalProfit = 0;
-  let totalBuyIns = 0;
-  let totalPlaytime = 0;
-  
-  // Profit und Zeit aus Sessions
-  cashgameSessions.forEach(session => {
-    totalProfit += parseFloat(session.total_result || 0);
-    totalPlaytime += parseFloat(session.duration_minutes || 0);
-  });
-  
-  // Buy-Ins aus Cashgames (buy_in Feld)
-  cashgames.forEach(game => {
-    const buyIn = parseFloat(game.buy_in || 0);
-    totalBuyIns += buyIn;
-  });
-  
-  console.log(`💰 Cashgame Buy-Ins from ${cashgames.length} games: ${totalBuyIns}`);
-  
-  const avgProfitPerHour = totalPlaytime > 0 ? (totalProfit / (totalPlaytime / 60)) : 0;
-  const avgProfitPerSession = cashgameSessions.length > 0 ? totalProfit / cashgameSessions.length : 0;
-  const totalROI = totalBuyIns > 0 ? (totalProfit / totalBuyIns) * 100 : 0;
-  
-  return {
-    totalProfit,
-    totalSessions: cashgameSessions.length,
-    totalPlaytime,
-    avgProfitPerHour,
-    avgProfitPerSession,
-    totalROI,
-    totalBuyIns
-  };
-}
-
-function calculateTournamentStatsFromGames(sessions, games) {
-  const tournaments = games.filter(g => ['tournament', 'sng', 'mtt'].includes(g.type));
-  
-  if (tournaments.length === 0) {
-    return {
-      totalProfit: 0,
-      totalTournaments: 0,
-      totalEntries: 0,
-      totalPlaytime: 0,
-      itmRatio: 0,
-      totalROI: 0,
-      avgBuyIn: 0,
-      totalBuyIns: 0
-    };
-  }
-  
-  let totalProfit = 0;
-  let totalBuyIns = 0;
-  let totalEntries = 0;
-  let totalPlaytime = 0;
-  let itmCount = 0;
-  
-  tournaments.forEach(t => {
-    // Für Turniere: buy_in und prize_money (falls vorhanden)
-    const buyIn = parseFloat(t.buy_in || 0);
-    const prizeMoney = parseFloat(t.prize_money || t.cash_out || 0);
-    const netResult = prizeMoney - buyIn;
-    
-    totalProfit += netResult;
-    totalBuyIns += buyIn;
-    totalEntries += t.entries || 1;
-    totalPlaytime += parseFloat(t.duration_minutes || 0);
-    
-    // ITM = In The Money (Gewinn gemacht)
-    if (t.itm === true || netResult > 0) {
-      itmCount++;
-    }
-  });
-  
-  console.log(`💰 Tournament Buy-Ins from ${tournaments.length} games: ${totalBuyIns}`);
-  
-  const avgBuyIn = tournaments.length > 0 ? totalBuyIns / tournaments.length : 0;
-  const itmRatio = tournaments.length > 0 ? (itmCount / tournaments.length) * 100 : 0;
-  const totalROI = totalBuyIns > 0 ? (totalProfit / totalBuyIns) * 100 : 0;
-  
-  return {
-    totalProfit,
-    totalTournaments: tournaments.length,
-    totalEntries,
-    totalPlaytime,
-    itmRatio,
-    totalROI,
-    avgBuyIn,
-    totalBuyIns
-  };
-}
-  if (tournaments.length > 0) {
-    const first = tournaments[0];
-    console.log('🔍 First tournament fields:', {
-      id: first.id,
-      buy_in: first.buy_in,
-      profit_loss: first.profit_loss,
-      net_profit: first.net_profit,
-      cash_out: first.cash_out
-    });
-  }
-  
-  if (tournaments.length === 0) {
-  const tournaments = games.filter(g => ['tournament', 'sng', 'mtt'].includes(g.type));
-  
-  if (tournaments.length === 0) {
-    return {
-      totalProfit: 0,
-      totalTournaments: 0,
-      totalEntries: 0,
-      totalPlaytime: 0,
-      itmRatio: 0,
-      totalROI: 0,
-      avgBuyIn: 0,
-      totalBuyIns: 0
-    };
-  }
-  
-  let totalProfit = 0;
-  let totalBuyIns = 0;
-  let totalEntries = 0;
-  let totalPlaytime = 0;
-  let itmCount = 0;
-  
-  tournaments.forEach(t => {
-    const netResult = parseFloat(t.net_result || 0);
-    const buyIn = parseFloat(t.total_buy_in || 0);
-    
-    totalProfit += netResult;
-    totalBuyIns += buyIn;
-    totalEntries += t.entries || 1;
-    totalPlaytime += parseFloat(t.duration_minutes || 0);
-    
-    // ITM = In The Money (Gewinn gemacht)
-    if (t.itm === true || netResult > 0) {
-      itmCount++;
-    }
-  });
-  
-  console.log(`💰 Tournament Buy-Ins: ${totalBuyIns}`);
-  
-  const avgBuyIn = tournaments.length > 0 ? totalBuyIns / tournaments.length : 0;
-  const itmRatio = tournaments.length > 0 ? (itmCount / tournaments.length) * 100 : 0;
-  const totalROI = totalBuyIns > 0 ? (totalProfit / totalBuyIns) * 100 : 0;
   
   return {
     totalProfit,
