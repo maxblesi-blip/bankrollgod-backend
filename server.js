@@ -2093,8 +2093,6 @@ function calculateTournamentStatsFromGames(sessions, games) {
     totalBuyIns
   };
 }
-
-console.log('🔍 DEBUG tournaments:', tournaments.length);
   if (tournaments.length > 0) {
     const first = tournaments[0];
     console.log('🔍 First tournament fields:', {
