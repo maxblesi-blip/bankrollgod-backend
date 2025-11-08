@@ -1935,6 +1935,177 @@ app.use((error, req, res, next) => {
   });
 });
 
+
+// =============================================================================
+// GAMES TABLE MIGRATION - Füge diese Route in server.js ein
+// Fügt fehlende Spalten zur games-Tabelle hinzu
+// =============================================================================
+
+// POST /api/migrate/games-table
+app.post('/api/migrate/games-table', authenticateToken, async (req, res) => {
+  try {
+    console.log('🔧 Starting games table migration...');
+    
+    // Check if user is authorized (optional - remove if you want anyone to run migrations)
+    // For security, you might want to check if user is admin
+    
+    const migrations = [];
+    
+    // Migration 1: Add total_buy_in column if not exists
+    try {
+      await pool.query(`
+        ALTER TABLE games 
+        ADD COLUMN IF NOT EXISTS total_buy_in DECIMAL(10, 2) DEFAULT 0
+      `);
+      migrations.push('✅ Added total_buy_in column');
+      console.log('✅ total_buy_in column added or already exists');
+    } catch (err) {
+      console.error('❌ Error adding total_buy_in:', err.message);
+      migrations.push(`❌ total_buy_in failed: ${err.message}`);
+    }
+    
+    // Migration 2: Add net_result column if not exists
+    try {
+      await pool.query(`
+        ALTER TABLE games 
+        ADD COLUMN IF NOT EXISTS net_result DECIMAL(10, 2) DEFAULT 0
+      `);
+      migrations.push('✅ Added net_result column');
+      console.log('✅ net_result column added or already exists');
+    } catch (err) {
+      console.error('❌ Error adding net_result:', err.message);
+      migrations.push(`❌ net_result failed: ${err.message}`);
+    }
+    
+    // Migration 3: Add buy_in column if not exists (some games might use this)
+    try {
+      await pool.query(`
+        ALTER TABLE games 
+        ADD COLUMN IF NOT EXISTS buy_in DECIMAL(10, 2) DEFAULT 0
+      `);
+      migrations.push('✅ Added buy_in column');
+      console.log('✅ buy_in column added or already exists');
+    } catch (err) {
+      console.error('❌ Error adding buy_in:', err.message);
+      migrations.push(`❌ buy_in failed: ${err.message}`);
+    }
+    
+    // Migration 4: Add cash_out column for cashgames
+    try {
+      await pool.query(`
+        ALTER TABLE games 
+        ADD COLUMN IF NOT EXISTS cash_out DECIMAL(10, 2) DEFAULT 0
+      `);
+      migrations.push('✅ Added cash_out column');
+      console.log('✅ cash_out column added or already exists');
+    } catch (err) {
+      console.error('❌ Error adding cash_out:', err.message);
+      migrations.push(`❌ cash_out failed: ${err.message}`);
+    }
+    
+    // Migration 5: Add prize_money column for tournaments
+    try {
+      await pool.query(`
+        ALTER TABLE games 
+        ADD COLUMN IF NOT EXISTS prize_money DECIMAL(10, 2) DEFAULT 0
+      `);
+      migrations.push('✅ Added prize_money column');
+      console.log('✅ prize_money column added or already exists');
+    } catch (err) {
+      console.error('❌ Error adding prize_money:', err.message);
+      migrations.push(`❌ prize_money failed: ${err.message}`);
+    }
+    
+    // Migration 6: Add entries column for tournaments (re-entries)
+    try {
+      await pool.query(`
+        ALTER TABLE games 
+        ADD COLUMN IF NOT EXISTS entries INTEGER DEFAULT 1
+      `);
+      migrations.push('✅ Added entries column');
+      console.log('✅ entries column added or already exists');
+    } catch (err) {
+      console.error('❌ Error adding entries:', err.message);
+      migrations.push(`❌ entries failed: ${err.message}`);
+    }
+    
+    // Migration 7: Add itm (In The Money) boolean for tournaments
+    try {
+      await pool.query(`
+        ALTER TABLE games 
+        ADD COLUMN IF NOT EXISTS itm BOOLEAN DEFAULT false
+      `);
+      migrations.push('✅ Added itm column');
+      console.log('✅ itm column added or already exists');
+    } catch (err) {
+      console.error('❌ Error adding itm:', err.message);
+      migrations.push(`❌ itm failed: ${err.message}`);
+    }
+    
+    // Migration 8: Add duration_minutes for games
+    try {
+      await pool.query(`
+        ALTER TABLE games 
+        ADD COLUMN IF NOT EXISTS duration_minutes INTEGER DEFAULT 0
+      `);
+      migrations.push('✅ Added duration_minutes column');
+      console.log('✅ duration_minutes column added or already exists');
+    } catch (err) {
+      console.error('❌ Error adding duration_minutes:', err.message);
+      migrations.push(`❌ duration_minutes failed: ${err.message}`);
+    }
+    
+    // Check current table structure
+    const tableInfo = await pool.query(`
+      SELECT column_name, data_type, is_nullable, column_default
+      FROM information_schema.columns
+      WHERE table_name = 'games'
+      ORDER BY ordinal_position
+    `);
+    
+    console.log('✅ Games table migration completed!');
+    
+    res.json({
+      success: true,
+      message: 'Games table migration completed successfully',
+      migrations: migrations,
+      currentColumns: tableInfo.rows
+    });
+    
+  } catch (error) {
+    console.error('❌ Migration error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Migration failed',
+      error: error.message
+    });
+  }
+});
+
+// GET /api/games/structure - Check games table structure
+app.get('/api/games/structure', authenticateToken, async (req, res) => {
+  try {
+    const tableInfo = await pool.query(`
+      SELECT column_name, data_type, is_nullable, column_default
+      FROM information_schema.columns
+      WHERE table_name = 'games'
+      ORDER BY ordinal_position
+    `);
+    
+    res.json({
+      success: true,
+      columns: tableInfo.rows
+    });
+  } catch (error) {
+    console.error('Error getting table structure:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get table structure',
+      error: error.message
+    });
+  }
+});
+
 // =============================================================================
 // SERVER START
 // =============================================================================
@@ -1963,5 +2134,7 @@ process.on('SIGTERM', async () => {
   await pool.end();
   process.exit(0);
 });
+
+
 
 module.exports = app;
