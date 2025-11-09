@@ -1268,17 +1268,17 @@ app.post('/api/games', authenticateToken, async (req, res) => {
   }
 });
 
-// COMPLETE GAME WITH WINNINGS - ⚡ ONLY ADD WINNINGS (Buy-Ins already deducted!)
 app.post('/api/games/:id/complete', authenticateToken, async (req, res) => {
   const client = await pool.connect();
   
   try {
     const gameId = req.params.id;
     const userId = req.user.userId;
-    const { winnings } = req.body;
+    const { winnings, position, total_players } = req.body;
 
     await client.query('BEGIN');
 
+    // ⚡ GET GAME WITH DETAILED LOGGING
     const gameResult = await client.query(`
       SELECT 
         g.*,
@@ -1301,22 +1301,24 @@ app.post('/api/games/:id/complete', authenticateToken, async (req, res) => {
     }
 
     const game = gameResult.rows[0];
-
     const winningsAmount = parseFloat(winnings || 0);
-    const totalBuyIn = parseFloat(game.buy_in) * parseInt(game.entries);
-    const netProfit = winningsAmount - totalBuyIn;  // For display only
+    
+    // ⚡ KORRIGIERTE BERECHNUNG: Berücksichtige Entries!
+    const totalBuyIn = parseFloat(game.buy_in) * parseInt(game.entries || 1);
+    const netProfit = winningsAmount - totalBuyIn;
 
-    console.log('💰 Game Completion:', {
+    console.log('💰 Game Completion Details:', {
       gameId,
       gameName: game.name,
       buyIn: game.buy_in,
-      entries: game.entries,
-      totalBuyIn,
+      entries: game.entries, // ← DEBUGGING
+      totalBuyIn, // ← DEBUGGING
       winnings: winningsAmount,
-      netProfitForDisplay: netProfit,
+      netProfit,
       bankrollBefore: game.bankroll_current_amount
     });
 
+    // ⚡ UPDATE GAME - Mit korrekten Entries
     const updatedGame = await client.query(`
       UPDATE games 
       SET 
@@ -1325,13 +1327,14 @@ app.post('/api/games/:id/complete', authenticateToken, async (req, res) => {
         net_profit = $2,
         cash_out = $1,
         profit_loss = $2,
+        position = $3,
         end_time = CURRENT_TIMESTAMP,
         updated_at = CURRENT_TIMESTAMP
-      WHERE id = $3
+      WHERE id = $4
       RETURNING *
-    `, [winningsAmount, netProfit, gameId]);
+    `, [winningsAmount, netProfit, position || null, gameId]);
 
-    // ⚡ BANKROLL UPDATE - ONLY ADD WINNINGS (Buy-Ins already deducted at game start!)
+    // ⚡ BANKROLL UPDATE - ONLY ADD WINNINGS (Buy-Ins already deducted!)
     const newBankrollAmount = parseFloat(game.bankroll_current_amount) + winningsAmount;
 
     const bankrollUpdate = await client.query(`
@@ -1343,26 +1346,28 @@ app.post('/api/games/:id/complete', authenticateToken, async (req, res) => {
       RETURNING *
     `, [newBankrollAmount, game.bankroll_id]);
 
-    const updatedBankroll = bankrollUpdate.rows[0];
-
-    console.log('✅ Bankroll updated (only winnings added):', {
-      bankrollId: game.bankroll_id,
-      oldAmount: game.bankroll_current_amount,
+    console.log('✅ Game completed with correct entries calculation:', {
+      entries: game.entries,
+      totalBuyInDeducted: totalBuyIn,
       winningsAdded: winningsAmount,
-      newAmount: newBankrollAmount,
-      netProfitDisplay: netProfit
+      netProfitCalculated: netProfit,
+      newBankrollAmount
     });
 
     await client.query('COMMIT');
 
-    console.log('✅ Game completed successfully');
-
-    // ⚡ RETURN BOTH GAME AND BANKROLL
     res.json({
       success: true,
       data: {
         game: updatedGame.rows[0],
-        bankroll: updatedBankroll
+        bankroll: bankrollUpdate.rows[0],
+        calculation: { // ← DEBUG INFO
+          buyInPerEntry: game.buy_in,
+          entries: game.entries,
+          totalBuyIn,
+          winnings: winningsAmount,
+          netProfit
+        }
       }
     });
 
@@ -1371,13 +1376,12 @@ app.post('/api/games/:id/complete', authenticateToken, async (req, res) => {
     console.error('❌ Error completing game:', error);
     res.status(500).json({
       success: false,
-      error: 'Fehler beim Beenden des Games'
+      error: 'Fehler beim Beenden des Games: ' + error.message
     });
   } finally {
     client.release();
   }
 });
-
 // UPDATE GAME ENTRIES - WITH BANKROLL ADJUSTMENT
 app.patch('/api/games/:id/entries', authenticateToken, async (req, res) => {
   const client = await pool.connect();
