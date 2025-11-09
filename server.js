@@ -5,6 +5,7 @@ const rateLimit = require('express-rate-limit');
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const obsRoutes = require('./routes/obs');
 require('dotenv').config();
 
 console.log('🔍 DEBUG: DATABASE_URL exists:', !!process.env.DATABASE_URL);
@@ -2122,9 +2123,13 @@ app.get('/api/games/structure', authenticateToken, async (req, res) => {
 });
 
 // =============================================================================
-// SERVER START
+// OBS ROUTES (Public API for Streaming)
 // =============================================================================
+app.use('/api/obs', obsRoutes);
 
+// =============================================================================
+// SERVER START  
+// =============================================================================
 app.listen(PORT, () => {
   console.log('🚀 ================================');
   console.log('🎮 BankrollGod Backend (Production)');
