@@ -2498,6 +2498,35 @@ process.on('SIGTERM', async () => {
   process.exit(0);
 });
 
-
+// Entry Update Fix
+app.put('/api/games/:id/entries-fix', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { entries } = req.body;
+    
+    console.log(`🔧 ENTRIES FIX: Game ${id} entries → ${entries}`);
+    
+    const result = await pool.query(
+      'UPDATE games SET entries = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
+      [entries, id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Game not found' });
+    }
+    
+    console.log(`✅ ENTRIES FIX: Updated to ${result.rows[0].entries} entries`);
+    
+    res.json({
+      success: true,
+      message: `Entries updated to ${entries}`,
+      data: result.rows[0]
+    });
+    
+  } catch (error) {
+    console.error('❌ ENTRIES FIX Error:', error);
+    res.status(500).json({ success: false, message: 'Update failed', error: error.message });
+  }
+});
 
 module.exports = app;
