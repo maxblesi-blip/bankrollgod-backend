@@ -2125,7 +2125,13 @@ app.get('/api/games/structure', authenticateToken, async (req, res) => {
 // =============================================================================
 // OBS ROUTES (Public API for Streaming)
 // =============================================================================
-app.use('/api/obs', obsRoutes);
+app.get('/api/obs/status', (req, res) => {
+  res.json({
+    success: true,
+    message: 'OBS API running (direct route)',
+    timestamp: new Date().toISOString()
+  });
+});
 
 // =============================================================================
 // SERVER START  
