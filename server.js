@@ -1931,9 +1931,19 @@ function calculateTournamentStatsFromGames(sessions, games) {
 }
 
 // =============================================================================
-// ERROR HANDLERS
+// OBS ROUTES - VOR dem Catch-All Handler!
 // =============================================================================
+app.get('/api/obs/status', (req, res) => {
+  res.json({
+    success: true,
+    message: 'OBS API running (direct route)',
+    timestamp: new Date().toISOString()
+  });
+});
 
+// =============================================================================
+// ERROR HANDLERS - Catch-All MUSS am Ende bleiben!
+// =============================================================================
 app.use('*', (req, res) => {
   res.status(404).json({
     success: false,
@@ -2120,17 +2130,6 @@ app.get('/api/games/structure', authenticateToken, async (req, res) => {
       error: error.message
     });
   }
-});
-
-// =============================================================================
-// OBS ROUTES (Public API for Streaming)
-// =============================================================================
-app.get('/api/obs/status', (req, res) => {
-  res.json({
-    success: true,
-    message: 'OBS API running (direct route)',
-    timestamp: new Date().toISOString()
-  });
 });
 
 // =============================================================================
