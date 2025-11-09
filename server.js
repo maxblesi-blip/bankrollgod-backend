@@ -1529,10 +1529,187 @@ app.get('/api/games', authenticateToken, async (req, res) => {
   }
 });
 
-// ⚡ ADD: PUT /api/games/:id (general game updates)  
-app.put('/api/games/:id', authenticateToken, async (req, res) => {
-  // ... der ganze PUT code ...
+// =============================================================================
+// ENTRY UPDATE FIX - Füge das zu deiner server.js hinzu
+// =============================================================================
+
+// PUT /api/games/:id - Update game with CORRECTED entry handling
+app.put('/api/games/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updateData = req.body;
+    
+    console.log(`🔧 ENTRY UPDATE FIX: Updating game ${id}`, updateData);
+    
+    // Build dynamic update query
+    const updateFields = [];
+    const values = [];
+    let paramCounter = 1;
+    
+    // Handle all possible fields that might be updated
+    const allowedFields = [
+      'name', 'type', 'buy_in', 'winnings', 'entries', 'position', 
+      'status', 'notes', 'cash_out', 'profit_loss', 'net_profit', 
+      'start_time', 'end_time', 'duration_minutes'
+    ];
+    
+    allowedFields.forEach(field => {
+      if (updateData[field] !== undefined) {
+        updateFields.push(`${field} = $${paramCounter}`);
+        values.push(updateData[field]);
+        paramCounter++;
+        
+        // ✅ SPECIAL LOG FOR ENTRIES
+        if (field === 'entries') {
+          console.log(`🎯 ENTRIES UPDATE: ${field} = ${updateData[field]}`);
+        }
+      }
+    });
+    
+    if (updateFields.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No valid fields to update'
+      });
+    }
+    
+    // Add updated_at
+    updateFields.push(`updated_at = CURRENT_TIMESTAMP`);
+    values.push(id); // For WHERE clause
+    
+    const updateQuery = `
+      UPDATE games 
+      SET ${updateFields.join(', ')} 
+      WHERE id = $${paramCounter}
+      RETURNING *
+    `;
+    
+    console.log('🔧 ENTRY UPDATE FIX: SQL Query:', updateQuery);
+    console.log('🔧 ENTRY UPDATE FIX: Values:', values);
+    
+    const result = await pool.query(updateQuery, values);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Game not found'
+      });
+    }
+    
+    const updatedGame = result.rows[0];
+    
+    console.log('✅ ENTRY UPDATE FIX: Game updated successfully');
+    console.log('✅ ENTRY UPDATE FIX: New entries value:', updatedGame.entries);
+    
+    // Recalculate session and bankroll stats
+    try {
+      // Update session totals
+      const sessionStatsQuery = `
+        UPDATE sessions 
+        SET 
+          total_buy_ins = (
+            SELECT COALESCE(SUM(buy_in * COALESCE(entries, 1)), 0) 
+            FROM games WHERE session_id = (SELECT session_id FROM games WHERE id = $1)
+          ),
+          total_winnings = (
+            SELECT COALESCE(SUM(winnings), 0) 
+            FROM games WHERE session_id = (SELECT session_id FROM games WHERE id = $1)
+          ),
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = (SELECT session_id FROM games WHERE id = $1)
+        RETURNING *
+      `;
+      
+      const sessionResult = await pool.query(sessionStatsQuery, [id]);
+      console.log('✅ ENTRY UPDATE FIX: Session stats updated');
+      
+      // Update bankroll stats
+      if (sessionResult.rows.length > 0) {
+        const session = sessionResult.rows[0];
+        const bankrollStatsQuery = `
+          UPDATE bankrolls 
+          SET 
+            current_amount = initial_amount + (
+              SELECT COALESCE(SUM(total_winnings - total_buy_ins), 0)
+              FROM sessions WHERE bankroll_id = $1
+            ),
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = $1
+          RETURNING *
+        `;
+        
+        await pool.query(bankrollStatsQuery, [session.bankroll_id]);
+        console.log('✅ ENTRY UPDATE FIX: Bankroll stats updated');
+      }
+      
+    } catch (statsError) {
+      console.error('⚠️ ENTRY UPDATE FIX: Stats update failed:', statsError);
+      // Continue anyway, main update succeeded
+    }
+    
+    res.json({
+      success: true,
+      message: 'Game updated successfully',
+      data: updatedGame
+    });
+    
+  } catch (error) {
+    console.error('❌ ENTRY UPDATE FIX: Error updating game:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update game',
+      error: error.message
+    });
+  }
 });
+
+// PATCH /api/games/:id/entries - Specific endpoint for entries updates
+app.patch('/api/games/:id/entries', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { entries } = req.body;
+    
+    if (!entries || entries < 1) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid entries value required (min: 1)'
+      });
+    }
+    
+    console.log(`🔧 ENTRIES PATCH: Updating game ${id} entries to ${entries}`);
+    
+    const result = await pool.query(
+      'UPDATE games SET entries = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
+      [entries, id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Game not found'
+      });
+    }
+    
+    const updatedGame = result.rows[0];
+    console.log(`✅ ENTRIES PATCH: Updated to ${updatedGame.entries} entries`);
+    
+    res.json({
+      success: true,
+      message: `Entries updated to ${entries}`,
+      data: updatedGame
+    });
+    
+  } catch (error) {
+    console.error('❌ ENTRIES PATCH: Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update entries',
+      error: error.message
+    });
+  }
+});
+
+console.log('✅ ENTRY UPDATE FIX: Entry update endpoints loaded');
 
 
 // =============================================================================
