@@ -235,6 +235,107 @@ router.get('/session/:sessionId/direct', async (req, res) => {
   }
 });
 
+// GET /api/obs/debug/games/:sessionId - Debug Games-Struktur (TEMPORÄR)
+router.get('/debug/games/:sessionId', async (req, res) => {
+  try {
+    console.log(`🔍 DEBUG: Fetching games structure for session: ${req.params.sessionId}`);
+    
+    // Hole alle Games für diese Session (ohne Auth)
+    const gamesQuery = await pool.query(
+      'SELECT * FROM games WHERE session_id = $1 LIMIT 3',
+      [req.params.sessionId]
+    );
+    
+    console.log(`🔍 DEBUG: Found ${gamesQuery.rows.length} games`);
+    
+    if (gamesQuery.rows.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No games found',
+        sessionId: req.params.sessionId
+      });
+    }
+    
+    const firstGame = gamesQuery.rows[0];
+    const allGames = gamesQuery.rows;
+    
+    // Analysiere alle verfügbaren Spalten
+    const columns = Object.keys(firstGame);
+    
+    // Finde entries-ähnliche Felder
+    const entriesFields = columns.filter(col => 
+      col.toLowerCase().includes('entr') || 
+      col.toLowerCase().includes('count') ||
+      col.toLowerCase().includes('multi')
+    );
+    
+    // Finde buy-in-ähnliche Felder  
+    const buyinFields = columns.filter(col =>
+      col.toLowerCase().includes('buy') ||
+      col.toLowerCase().includes('cost') ||
+      col.toLowerCase().includes('fee') ||
+      col.toLowerCase().includes('stake')
+    );
+    
+    // Teste verschiedene Berechnungen
+    const calculations = [];
+    
+    for (const game of allGames) {
+      const calc = {
+        gameId: game.id,
+        gameName: game.name,
+        rawData: {
+          entries: game.entries,
+          entry_count: game.entry_count,
+          buy_in: game.buy_in,
+          buyin: game.buyin,
+          entry_fee: game.entry_fee,
+          winnings: game.winnings
+        },
+        calculations: {}
+      };
+      
+      // Verschiedene Berechnungsansätze
+      if (game.buy_in && game.entries) {
+        calc.calculations.buyIn_x_entries = parseFloat(game.buy_in) * parseInt(game.entries || 1);
+      }
+      if (game.buyin && game.entries) {
+        calc.calculations.buyin_x_entries = parseFloat(game.buyin) * parseInt(game.entries || 1);
+      }
+      if (game.entry_fee && game.entries) {
+        calc.calculations.entryFee_x_entries = parseFloat(game.entry_fee) * parseInt(game.entries || 1);
+      }
+      
+      calculations.push(calc);
+    }
+    
+    res.json({
+      success: true,
+      debug: {
+        sessionId: req.params.sessionId,
+        totalGames: allGames.length,
+        availableColumns: columns,
+        entriesFields: entriesFields,
+        buyinFields: buyinFields,
+        firstGameSample: firstGame,
+        calculations: calculations,
+        recommendation: {
+          entriesField: entriesFields.length > 0 ? entriesFields[0] : 'entries',
+          buyinField: buyinFields.length > 0 ? buyinFields[0] : 'buy_in'
+        }
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ DEBUG Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Debug failed',
+      error: error.message
+    });
+  }
+});
+
 // GET /api/obs/health - Health check für OBS
 router.get('/health', (req, res) => {
   res.json({
@@ -245,7 +346,8 @@ router.get('/health', (req, res) => {
     endpoints: [
       '/api/obs/bankroll/:id',
       '/api/obs/session/:bankrollId/active',
-      '/api/obs/session/:sessionId/direct'
+      '/api/obs/session/:sessionId/direct',
+      '/api/obs/debug/games/:sessionId'
     ]
   });
 });
