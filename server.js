@@ -1993,9 +1993,9 @@ app.get('/api/obs/session/:bankrollId/active', async (req, res) => {
   try {
     const bankrollId = req.params.bankrollId;
     
-    console.log(`🎥 Calculating live session data for bankroll: ${bankrollId}`);
+    console.log(`🎥 Calculating live OBS session data for bankroll: ${bankrollId}`);
     
-    // 1. Finde aktive Session
+    // 1. Finde aktive Session für diese Bankroll
     const activeSessionQuery = await pool.query(
       `SELECT id, name, start_time 
        FROM sessions 
@@ -2005,6 +2005,7 @@ app.get('/api/obs/session/:bankrollId/active', async (req, res) => {
     );
 
     if (activeSessionQuery.rows.length === 0) {
+      console.log(`❌ No active session found for bankroll ${bankrollId}`);
       return res.json({
         success: true,
         data: {
@@ -2018,13 +2019,14 @@ app.get('/api/obs/session/:bankrollId/active', async (req, res) => {
     }
 
     const session = activeSessionQuery.rows[0];
+    console.log(`✅ Found active session: ${session.name} (ID: ${session.id})`);
     
-    // 2. Berechne LIVE aus Games-Tabelle
+    // 2. Berechne LIVE aus Games-Tabelle (inklusive Entries!)
     const gamesQuery = await pool.query(
       `SELECT 
         -- Buy-Ins (inklusive Entries!)
         COALESCE(SUM(buy_in * COALESCE(entries, 1)), 0) as total_buyins,
-        -- Cash-Outs / Winnings
+        -- Cash-Outs / Winnings für completed games
         COALESCE(SUM(CASE 
           WHEN status = 'completed' THEN COALESCE(winnings, cash_out, 0)
           ELSE 0 
@@ -2035,7 +2037,18 @@ app.get('/api/obs/session/:bankrollId/active', async (req, res) => {
           THEN 1 
         END) as cash_count,
         -- Alle Games in der Session
-        COUNT(*) as total_games
+        COUNT(*) as total_games,
+        -- Detaillierte Info für Debugging
+        array_agg(
+          json_build_object(
+            'name', name,
+            'buy_in', buy_in,
+            'entries', COALESCE(entries, 1),
+            'total_buyin', buy_in * COALESCE(entries, 1),
+            'winnings', COALESCE(winnings, 0),
+            'status', status
+          )
+        ) as games_detail
        FROM games 
        WHERE session_id = $1`,
       [session.id]
@@ -2048,6 +2061,19 @@ app.get('/api/obs/session/:bankrollId/active', async (req, res) => {
     const cashCount = parseInt(gameStats.cash_count || 0);
     const profit = totalCashes - totalBuyins;
 
+    console.log('🎯 OBS Session calculation details:', {
+      sessionId: session.id,
+      sessionName: session.name,
+      totalGames: gameStats.total_games,
+      gamesDetail: gameStats.games_detail,
+      calculated: {
+        totalBuyins,
+        totalCashes,
+        cashCount,
+        profit
+      }
+    });
+
     const sessionData = {
       total_buyins: totalBuyins,
       total_cashes: totalCashes,
@@ -2057,15 +2083,7 @@ app.get('/api/obs/session/:bankrollId/active', async (req, res) => {
       total_games: parseInt(gameStats.total_games || 0)
     };
 
-    console.log('✅ LIVE Session calculation:', {
-      sessionId: session.id,
-      sessionName: session.name,
-      totalBuyins,
-      totalCashes,
-      cashCount,
-      profit,
-      gamesInSession: gameStats.total_games
-    });
+    console.log('✅ OBS Session data sent:', sessionData);
 
     res.json({
       success: true,
