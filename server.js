@@ -1931,14 +1931,109 @@ function calculateTournamentStatsFromGames(sessions, games) {
 }
 
 // =============================================================================
-// OBS ROUTES - VOR dem Catch-All Handler!
+// OBS ROUTES (Public API for Streaming) - VOR Catch-All Handler!
 // =============================================================================
+
+// OBS Health Check
 app.get('/api/obs/status', (req, res) => {
   res.json({
     success: true,
-    message: 'OBS API running (direct route)',
+    message: 'OBS API running',
     timestamp: new Date().toISOString()
   });
+});
+
+// OBS Bankroll Data (OHNE Auth)
+app.get('/api/obs/bankroll/:id', async (req, res) => {
+  try {
+    const bankrollId = req.params.id;
+    
+    const bankroll = await pool.query(
+      'SELECT name, current_amount, starting_amount, currency, type FROM bankrolls WHERE id = $1',
+      [bankrollId]
+    );
+    
+    if (bankroll.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Bankroll not found'
+      });
+    }
+
+    const publicData = {
+      name: bankroll.rows[0].name,
+      current_amount: parseFloat(bankroll.rows[0].current_amount),
+      starting_amount: parseFloat(bankroll.rows[0].starting_amount),
+      currency: bankroll.rows[0].currency || 'EUR',
+      type: bankroll.rows[0].type
+    };
+
+    console.log('✅ OBS Bankroll data:', publicData);
+
+    res.json({
+      success: true,
+      data: publicData
+    });
+
+  } catch (error) {
+    console.error('❌ OBS Bankroll Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// OBS Active Session Data (OHNE Auth)
+app.get('/api/obs/session/:bankrollId/active', async (req, res) => {
+  try {
+    const bankrollId = req.params.bankrollId;
+    
+    const activeSession = await pool.query(
+      `SELECT name, total_result, total_games, duration_minutes, 
+              total_invested, total_winnings 
+       FROM sessions 
+       WHERE bankroll_id = $1 AND status = $2
+       ORDER BY start_time DESC LIMIT 1`,
+      [bankrollId, 'running']
+    );
+
+    if (activeSession.rows.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          total_buyins: 0,
+          total_cashes: 0,
+          cash_count: 0,
+          session_name: 'Keine aktive Session',
+          profit: 0
+        }
+      });
+    }
+
+    const session = activeSession.rows[0];
+    const sessionData = {
+      total_buyins: parseFloat(session.total_invested || 0),
+      total_cashes: parseFloat(session.total_winnings || 0),
+      cash_count: parseInt(session.total_games || 0),
+      session_name: session.name || 'Aktive Session',
+      profit: parseFloat(session.total_result || 0)
+    };
+
+    console.log('✅ OBS Session data:', sessionData);
+
+    res.json({
+      success: true,
+      data: sessionData
+    });
+
+  } catch (error) {
+    console.error('❌ OBS Session Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
 });
 
 // =============================================================================
