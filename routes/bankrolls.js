@@ -185,7 +185,7 @@ router.put('/:id', [
   }
 });
 
-// DELETE /api/bankrolls/:id - Delete bankroll
+// ✅ DELETE /api/bankrolls/:id - Delete bankroll with session cleanup
 router.delete('/:id', [
   param('id').isUUID().withMessage('Invalid bankroll ID')
 ], handleValidationErrors, async (req, res) => {
@@ -199,17 +199,131 @@ router.delete('/:id', [
       });
     }
     
+    console.log(`🔧 Deleting bankroll ${req.params.id} - checking for active sessions...`);
+    
+    // ✅ STEP 1: Find and end all active sessions for this bankroll
+    const activeSessions = await Session.findAll({
+      where: {
+        bankroll_id: req.params.id,
+        status: 'running'
+      }
+    });
+    
+    console.log(`🔧 Found ${activeSessions.length} active sessions to end`);
+    
+    if (activeSessions.length > 0) {
+      // End all active sessions
+      for (const session of activeSessions) {
+        console.log(`🔧 Ending session: ${session.name} (${session.id})`);
+        
+        // Update session to completed status
+        await session.update({
+          status: 'completed',
+          end_time: new Date(),
+          updated_at: new Date()
+        });
+        
+        // Update session stats before ending
+        try {
+          await session.updateStatsFromGames();
+          console.log(`✅ Session ${session.id} stats updated and ended`);
+        } catch (statsError) {
+          console.warn(`⚠️ Could not update stats for session ${session.id}:`, statsError.message);
+        }
+      }
+      
+      console.log(`✅ All ${activeSessions.length} sessions ended successfully`);
+    }
+    
+    // ✅ STEP 2: Delete the bankroll
     await bankroll.destroy();
     
     res.json({
       success: true,
-      message: 'Bankroll deleted successfully'
+      message: 'Bankroll deleted successfully',
+      sessionsEnded: activeSessions.length,
+      endedSessions: activeSessions.map(s => ({
+        id: s.id,
+        name: s.name,
+        endedAt: new Date().toISOString()
+      }))
     });
+    
   } catch (error) {
     console.error('Error deleting bankroll:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to delete bankroll',
+      error: error.message
+    });
+  }
+});
+
+// ✅ POST /api/bankrolls/repair-orphaned-sessions - Repariere verwaiste Sessions
+router.post('/repair-orphaned-sessions', async (req, res) => {
+  try {
+    console.log('🔧 Starting orphaned sessions repair...');
+    
+    // Find sessions with non-existent bankroll_ids
+    const orphanedSessions = await Session.findAll({
+      where: {
+        status: 'running'
+      },
+      include: [
+        {
+          model: Bankroll,
+          as: 'bankroll',
+          required: false // LEFT JOIN to find sessions without bankrolls
+        }
+      ]
+    });
+    
+    // Filter for sessions where bankroll is null (orphaned)
+    const trueOrphans = orphanedSessions.filter(session => !session.bankroll);
+    
+    console.log(`🔧 Found ${trueOrphans.length} orphaned sessions`);
+    
+    if (trueOrphans.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No orphaned sessions found',
+        repairedSessions: []
+      });
+    }
+    
+    const repairedSessions = [];
+    
+    // End all orphaned sessions
+    for (const session of trueOrphans) {
+      console.log(`🔧 Repairing orphaned session: ${session.name} (${session.id})`);
+      
+      await session.update({
+        status: 'completed',
+        end_time: new Date(),
+        updated_at: new Date()
+      });
+      
+      repairedSessions.push({
+        id: session.id,
+        name: session.name,
+        bankroll_id: session.bankroll_id,
+        repairedAt: new Date().toISOString()
+      });
+    }
+    
+    console.log(`✅ Repaired ${repairedSessions.length} orphaned sessions`);
+    
+    res.json({
+      success: true,
+      message: `Successfully repaired ${repairedSessions.length} orphaned sessions`,
+      repairedSessions: repairedSessions
+    });
+    
+  } catch (error) {
+    console.error('Error repairing orphaned sessions:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to repair orphaned sessions',
       error: error.message
     });
   }
