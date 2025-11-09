@@ -47,6 +47,9 @@ app.use(rateLimit({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+// ✅ OBS Routes Registration
+app.use('/api/obs', obsRoutes);
+
 // =============================================================================
 // AUTH MIDDLEWARE
 // =============================================================================
