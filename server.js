@@ -2278,7 +2278,29 @@ app.get('/api/obs/session/:bankrollId/active', async (req, res) => {
     });
   }
 });
-
+// ENTRY FIX - Simple version
+app.put('/api/games/:id/entries-fix', async (req, res) => {
+  console.log('🔧 ENTRY FIX CALLED:', req.params.id, req.body);
+  const { id } = req.params;
+  const { entries } = req.body;
+  
+  try {
+    const result = await pool.query(
+      'UPDATE games SET entries = $1 WHERE id = $2 RETURNING *',
+      [entries, id]
+    );
+    
+    console.log('🔧 ENTRY FIX RESULT:', result.rows[0]?.entries);
+    
+    res.json({
+      success: true,
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('🔧 ENTRY FIX ERROR:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 // =============================================================================
 // ERROR HANDLERS - Catch-All MUSS am Ende bleiben!
 // =============================================================================
