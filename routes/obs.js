@@ -1,45 +1,44 @@
 const express = require('express');
-const { param, validationResult } = require('express-validator');
-const { Bankroll, Session, Game } = require('../models');
+const { Pool } = require('pg');
 const router = express.Router();
 
-// Validation middleware
-const handleValidationErrors = (req, res, next) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({
-      success: false,
-      message: 'Validation failed',
-      errors: errors.array()
-    });
-  }
-  next();
-};
+// Database Connection (wird von server.js bereitgestellt)
+// Wir verwenden die gleiche Pool-Instanz
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL?.includes('render.com') ? { rejectUnauthorized: false } : false
+});
 
 // GET /api/obs/bankroll/:id - Bankroll-Daten für OBS mit korrekter Berechnung
-router.get('/bankroll/:id', [
-  param('id').isUUID().withMessage('Invalid bankroll ID')
-], handleValidationErrors, async (req, res) => {
+router.get('/bankroll/:id', async (req, res) => {
   try {
-    const bankroll = await Bankroll.findByPk(req.params.id);
+    console.log(`🎥 OBS: Fetching bankroll data for ID: ${req.params.id}`);
     
-    if (!bankroll) {
+    const bankrollQuery = await pool.query(
+      'SELECT * FROM bankrolls WHERE id = $1',
+      [req.params.id]
+    );
+    
+    if (bankrollQuery.rows.length === 0) {
+      console.log(`❌ OBS: Bankroll ${req.params.id} not found`);
       return res.status(404).json({
         success: false,
         message: 'Bankroll not found'
       });
     }
 
+    const bankroll = bankrollQuery.rows[0];
+    
     // Berechne korrekten Profit
-    const startingAmount = parseFloat(bankroll.starting_amount) || 0;
+    const startingAmount = parseFloat(bankroll.initial_amount) || 0;
     const currentAmount = parseFloat(bankroll.current_amount) || 0;
     const totalProfit = currentAmount - startingAmount;
 
     const obsData = {
       id: bankroll.id,
       name: bankroll.name,
-      type: bankroll.type,
-      currency: bankroll.currency || 'EUR',
+      type: bankroll.type || 'online',
+      currency: 'EUR',  // Standard, da nicht in DB gespeichert
       starting_amount: startingAmount,
       current_amount: currentAmount,
       total_profit: totalProfit,
@@ -48,13 +47,15 @@ router.get('/bankroll/:id', [
       last_updated: new Date().toISOString()
     };
 
+    console.log(`✅ OBS: Bankroll data sent:`, obsData);
+
     res.json({
       success: true,
       data: obsData
     });
 
   } catch (error) {
-    console.error('Error fetching OBS bankroll data:', error);
+    console.error('❌ OBS: Error fetching bankroll data:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to fetch bankroll data',
@@ -64,20 +65,21 @@ router.get('/bankroll/:id', [
 });
 
 // GET /api/obs/session/:bankrollId/active - Aktive Session-Daten für OBS mit korrekter Buy-in-Berechnung
-router.get('/session/:bankrollId/active', [
-  param('bankrollId').isUUID().withMessage('Invalid bankroll ID')
-], handleValidationErrors, async (req, res) => {
+router.get('/session/:bankrollId/active', async (req, res) => {
   try {
+    console.log(`🎥 OBS: Fetching active session for bankroll ID: ${req.params.bankrollId}`);
+    
     // Finde die aktive Session für diese Bankroll
-    const activeSession = await Session.findOne({
-      where: {
-        bankroll_id: req.params.bankrollId,
-        status: 'running'
-      },
-      order: [['start_time', 'DESC']]
-    });
+    const sessionQuery = await pool.query(
+      `SELECT * FROM sessions 
+       WHERE bankroll_id = $1 AND status = 'running' 
+       ORDER BY start_time DESC 
+       LIMIT 1`,
+      [req.params.bankrollId]
+    );
 
-    if (!activeSession) {
+    if (sessionQuery.rows.length === 0) {
+      console.log(`🎥 OBS: No active session found for bankroll ${req.params.bankrollId}`);
       // Keine aktive Session - return empty data
       return res.json({
         success: true,
@@ -96,53 +98,49 @@ router.get('/session/:bankrollId/active', [
       });
     }
 
-    // Hole alle Games für diese Session
-    const games = await Game.findAll({
-      where: { session_id: activeSession.id },
-      order: [['start_time', 'DESC']]
-    });
+    const session = sessionQuery.rows[0];
+    console.log(`🎥 OBS: Found active session: ${session.name} (${session.id})`);
 
-    // ✅ KORREKTE BERECHNUNG - Buy-ins mit Entries multiplizieren
-    let totalBuyins = 0;
-    let totalCashes = 0;
-    let cashCount = 0;
+    // Hole alle Games für diese Session mit korrekter Buy-in-Berechnung
+    const gamesQuery = await pool.query(
+      `SELECT 
+        COUNT(*) as total_games,
+        COALESCE(SUM(buy_in * COALESCE(entries, 1)), 0) as total_buyins,
+        COALESCE(SUM(CASE WHEN winnings > 0 THEN winnings ELSE 0 END), 0) as total_cashes,
+        COUNT(CASE WHEN winnings > 0 THEN 1 END) as cash_count
+       FROM games 
+       WHERE session_id = $1`,
+      [session.id]
+    );
 
-    games.forEach(game => {
-      const buyIn = parseFloat(game.buy_in) || 0;
-      const entries = parseInt(game.entries) || 1;
-      const winnings = parseFloat(game.winnings) || 0;
-
-      // Buy-in = buy_in * entries (KORREKT!)
-      totalBuyins += (buyIn * entries);
-      
-      // Cashes = gewonnene Beträge
-      if (winnings > 0) {
-        totalCashes += winnings;
-        cashCount++;
-      }
-    });
-
-    // Session Profit = Cashes - Buy-ins
+    const gameStats = gamesQuery.rows[0];
+    
+    // ✅ KORREKTE BERECHNUNG
+    const totalBuyins = parseFloat(gameStats.total_buyins) || 0;
+    const totalCashes = parseFloat(gameStats.total_cashes) || 0;
+    const cashCount = parseInt(gameStats.cash_count) || 0;
     const sessionProfit = totalCashes - totalBuyins;
 
     // Berechne Session-Dauer
-    const startTime = new Date(activeSession.start_time);
+    const startTime = new Date(session.start_time);
     const now = new Date();
     const durationMinutes = Math.floor((now - startTime) / (1000 * 60));
 
     const obsData = {
-      session_id: activeSession.id,
-      session_name: activeSession.name,
-      status: activeSession.status,
+      session_id: session.id,
+      session_name: session.name,
+      status: session.status,
       total_buyins: totalBuyins,
       total_cashes: totalCashes,
       cash_count: cashCount,
       profit: sessionProfit,
-      games_count: games.length,
+      games_count: parseInt(gameStats.total_games) || 0,
       duration_minutes: durationMinutes,
-      start_time: activeSession.start_time,
+      start_time: session.start_time,
       last_updated: new Date().toISOString()
     };
+
+    console.log(`✅ OBS: Session data sent:`, obsData);
 
     res.json({
       success: true,
@@ -150,7 +148,7 @@ router.get('/session/:bankrollId/active', [
     });
 
   } catch (error) {
-    console.error('Error fetching OBS session data:', error);
+    console.error('❌ OBS: Error fetching session data:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to fetch session data',
@@ -160,43 +158,41 @@ router.get('/session/:bankrollId/active', [
 });
 
 // GET /api/obs/session/:sessionId/direct - Direkte Session-Daten (alternative Endpoint)
-router.get('/session/:sessionId/direct', [
-  param('sessionId').isUUID().withMessage('Invalid session ID')
-], handleValidationErrors, async (req, res) => {
+router.get('/session/:sessionId/direct', async (req, res) => {
   try {
-    const session = await Session.findByPk(req.params.sessionId);
+    console.log(`🎥 OBS: Fetching direct session data for ID: ${req.params.sessionId}`);
     
-    if (!session) {
+    const sessionQuery = await pool.query(
+      'SELECT * FROM sessions WHERE id = $1',
+      [req.params.sessionId]
+    );
+    
+    if (sessionQuery.rows.length === 0) {
       return res.status(404).json({
         success: false,
         message: 'Session not found'
       });
     }
 
+    const session = sessionQuery.rows[0];
+
     // Hole alle Games für diese Session
-    const games = await Game.findAll({
-      where: { session_id: session.id },
-      order: [['start_time', 'DESC']]
-    });
+    const gamesQuery = await pool.query(
+      `SELECT 
+        COUNT(*) as total_games,
+        COALESCE(SUM(buy_in * COALESCE(entries, 1)), 0) as total_buyins,
+        COALESCE(SUM(CASE WHEN winnings > 0 THEN winnings ELSE 0 END), 0) as total_cashes,
+        COUNT(CASE WHEN winnings > 0 THEN 1 END) as cash_count
+       FROM games 
+       WHERE session_id = $1`,
+      [session.id]
+    );
 
-    // ✅ KORREKTE BERECHNUNG
-    let totalBuyins = 0;
-    let totalCashes = 0;
-    let cashCount = 0;
-
-    games.forEach(game => {
-      const buyIn = parseFloat(game.buy_in) || 0;
-      const entries = parseInt(game.entries) || 1;
-      const winnings = parseFloat(game.winnings) || 0;
-
-      totalBuyins += (buyIn * entries);
-      
-      if (winnings > 0) {
-        totalCashes += winnings;
-        cashCount++;
-      }
-    });
-
+    const gameStats = gamesQuery.rows[0];
+    
+    const totalBuyins = parseFloat(gameStats.total_buyins) || 0;
+    const totalCashes = parseFloat(gameStats.total_cashes) || 0;
+    const cashCount = parseInt(gameStats.cash_count) || 0;
     const sessionProfit = totalCashes - totalBuyins;
 
     // Berechne Dauer
@@ -215,12 +211,14 @@ router.get('/session/:sessionId/direct', [
       total_cashes: totalCashes,
       cash_count: cashCount,
       profit: sessionProfit,
-      games_count: games.length,
+      games_count: parseInt(gameStats.total_games) || 0,
       duration_minutes: durationMinutes,
       start_time: session.start_time,
       end_time: session.end_time,
       last_updated: new Date().toISOString()
     };
+
+    console.log(`✅ OBS: Direct session data sent:`, obsData);
 
     res.json({
       success: true,
@@ -228,7 +226,7 @@ router.get('/session/:sessionId/direct', [
     });
 
   } catch (error) {
-    console.error('Error fetching OBS session data:', error);
+    console.error('❌ OBS: Error fetching direct session data:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to fetch session data',
@@ -243,6 +241,7 @@ router.get('/health', (req, res) => {
     success: true,
     message: 'OBS API is running',
     timestamp: new Date().toISOString(),
+    database: 'PostgreSQL (Raw Queries)',
     endpoints: [
       '/api/obs/bankroll/:id',
       '/api/obs/session/:bankrollId/active',
